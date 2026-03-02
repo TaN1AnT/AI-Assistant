@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+python-dotenv
+google-auth
+google-cloud-aiplatform
+langchain-core
+langchain-google-vertexai
+requests
+langgraph
+grandalf
+fastmcp
+langchain-mcp-adapters
