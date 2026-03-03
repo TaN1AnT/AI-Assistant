@@ -4,60 +4,37 @@ LLM Helper for MCP Server Tools
 Provides a shared Gemini LLM instance and helper functions
 so that each MCP tool can generate polished, human-friendly answers.
 
-Authentication: Uses service account credentials from
-GOOGLE_APPLICATION_CREDENTIALS with cloud-platform scope.
+Uses ChatGoogleGenerativeAI with implicit authentication
+via GOOGLE_APPLICATION_CREDENTIALS or API key.
 """
 import os
 import logging
-from google.oauth2 import service_account
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.rate_limiters import InMemoryRateLimiter
 
 logger = logging.getLogger("mcp_server.shared.llm_helper")
 
-SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
-
-_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
-_PROJECT = os.getenv("GOOGLE_PROJECT_ID", "")
-_LOCATION = os.getenv("GOOGLE_LOCATION", "europe-west4")
 _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 
-# Allow ~60 requests per minute (1 per second)
-_rate_limiter = InMemoryRateLimiter(requests_per_minute=180, check_every_n_seconds=0.1, max_bucket_size=10)
-
-# Load service account credentials
-_credentials = None
-if _CREDENTIALS_PATH and os.path.isfile(_CREDENTIALS_PATH):
-    try:
-        _credentials = service_account.Credentials.from_service_account_file(
-            _CREDENTIALS_PATH,
-            scopes=SCOPES,
-        )
-        logger.info(f"LLM Helper: loaded SA {_credentials.service_account_email}")
-    except Exception as e:
-        logger.error(f"LLM Helper: failed to load SA: {e}")
+# Allow ~180 requests per minute (3 per second)
+_rate_limiter = InMemoryRateLimiter(requests_per_second=3, check_every_n_seconds=0.1, max_bucket_size=10)
 
 
-def get_llm(temperature: float = 0.2) -> ChatVertexAI:
-    """Returns a configured Gemini LLM for use inside MCP tools."""
-    kwargs = dict(
+def get_llm(temperature: float = 0.2) -> ChatGoogleGenerativeAI:
+    """Returns a configured Gemini LLM for use inside MCP tools via ChatGoogleGenerativeAI."""
+    return ChatGoogleGenerativeAI(
         model=_MODEL,
-        project=_PROJECT,
-        location=_LOCATION,
         temperature=temperature,
         max_retries=3,
         rate_limiter=_rate_limiter,
     )
-    if _credentials:
-        kwargs["credentials"] = _credentials
-    return ChatVertexAI(**kwargs)
 
 
 _llm = None
 
 
-def _get_shared_llm() -> ChatVertexAI:
+def _get_shared_llm() -> ChatGoogleGenerativeAI:
     global _llm
     if _llm is None:
         _llm = get_llm()

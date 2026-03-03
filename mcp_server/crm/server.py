@@ -2,7 +2,7 @@
 CRM MCP Server — Business data queries via n8n webhooks.
 
 Port: 8082
-Tools: get_deals, get_tasks, get_task_comments, get_checklists,
+Tools: get_tasks, get_task_comments, get_checklists,
        get_subtasks, get_approvals, get_time_tracking
 
 Run standalone: python -m mcp_server.crm.server

@@ -3,55 +3,24 @@ CRM Tools — Webhook-proxy tools for querying business data.
 
 Each tool:
 1. Accepts access_token + query parameters from the LangGraph agent.
-2. POSTs a JSON payload to the N8N_WEBHOOK_CRM webhook.
+2. POSTs a JSON payload to a DEDICATED n8n webhook URL (from .env).
 3. n8n uses the token to call the real CRM HTTP API.
 4. Receives the JSON response from n8n.
 5. Uses Gemini (via llm_helper) to format a human-readable answer.
 """
 import os
-import json
 import logging
-import requests
 from mcp_server.shared.llm_helper import generate_answer
+from mcp_server.shared.webhook_helper import call_n8n_webhook
 
 logger = logging.getLogger("mcp_server.crm.tools")
 
-# ── Shared webhook caller ──────────────────────────────────────────────────
 
-def _call_n8n_crm(webhook_url: str, token: str, params: dict) -> str:
-    """
-    Sends a request to a specific CRM n8n webhook.
+async def _call_n8n_crm(webhook_url: str, token: str, params: dict) -> str:
+    """Proxy to the shared async webhook helper for CRM-specific calls."""
+    return await call_n8n_webhook(webhook_url, token, params)
 
-    Args:
-        webhook_url: The specific URL for the CRM action.
-        token:       The user's access token, forwarded to n8n for API auth.
-        params:      Additional parameters for the request.
 
-    Returns:
-        Raw JSON string from n8n, or an error message.
-    """
-    if not webhook_url:
-        return "Error: Webhook URL is not configured in .env."
-
-    secret = os.getenv("N8N_WEBHOOK_SECRET", "")
-    payload = {"token": token, **params}
-    headers = {"Content-Type": "application/json", "X-Webhook-Secret": secret}
-
-    try:
-        resp = requests.post(webhook_url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return json.dumps(resp.json(), indent=2) if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:3000]
-    except requests.Timeout:
-        return "Error: CRM webhook timed out (30s)."
-    except requests.ConnectionError:
-        return f"Error: Cannot reach n8n at {webhook_url}."
-    except requests.HTTPError as e:
-        code = e.response.status_code if e.response else "?"
-        body = e.response.text[:300] if e.response else ""
-        return f"Error: Webhook returned HTTP {code}. {body}"
-    except Exception as e:
-        logger.error(f"CRM webhook error: {e}", exc_info=True)
-        return f"Error: {type(e).__name__}: {e}"
 
 
 # ── Tool registration ──────────────────────────────────────────────────────
@@ -60,7 +29,7 @@ def register_tools(mcp):
     """Register CRM query tools with the MCP server."""
 
     @mcp.tool()
-    def get_tasks(access_token: str, deal_id: str) -> str:
+    async def get_tasks(access_token: str, deal_id: str) -> str:
         """
         Retrieve tasks linked to a specific deal.
 
@@ -74,7 +43,7 @@ def register_tools(mcp):
             A formatted list of tasks.
         """
         url = os.getenv("N8N_WEBHOOK_CRM_GET_TASKS")
-        raw = _call_n8n_crm(url, access_token, {"deal_id": deal_id})
+        raw = await _call_n8n_crm(url, access_token, {"deal_id": deal_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -85,7 +54,7 @@ def register_tools(mcp):
         )
 
     @mcp.tool()
-    def get_task_comments(access_token: str, task_id: str) -> str:
+    async def get_task_comments(access_token: str, task_id: str) -> str:
         """
         Retrieve comments/discussion thread for a specific task.
 
@@ -99,7 +68,7 @@ def register_tools(mcp):
             A chronological summary of the comment thread.
         """
         url = os.getenv("N8N_WEBHOOK_CRM_GET_COMMENTS")
-        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
+        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -112,7 +81,7 @@ def register_tools(mcp):
     # ── Checklists ─────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def get_checklists(access_token: str, task_id: str) -> str:
+    async def get_checklists(access_token: str, task_id: str) -> str:
         """
         Retrieve checklists for a specific task.
 
@@ -127,7 +96,7 @@ def register_tools(mcp):
             A formatted list of checklist items with their completion status.
         """
         url = os.getenv("N8N_WEBHOOK_CRM_GET_CHECKLISTS")
-        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
+        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -141,7 +110,7 @@ def register_tools(mcp):
     # ── Subtasks ───────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def get_subtasks(access_token: str, task_id: str) -> str:
+    async def get_subtasks(access_token: str, task_id: str) -> str:
         """
         Retrieve subtasks (child tasks) for a specific task.
 
@@ -156,7 +125,7 @@ def register_tools(mcp):
             A formatted list of subtasks with status and assignee.
         """
         url = os.getenv("N8N_WEBHOOK_CRM_GET_SUBTASKS")
-        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
+        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -170,7 +139,7 @@ def register_tools(mcp):
     # ── Approvals ──────────────────────────────────────────────────────────
 
     @mcp.tool()
-    def get_approvals(access_token: str, task_id: str) -> str:
+    async def get_approvals(access_token: str, task_id: str) -> str:
         """
         Retrieve approval requests and their statuses for a task.
 
@@ -185,7 +154,7 @@ def register_tools(mcp):
             A summary of approval statuses per approver.
         """
         url = os.getenv("N8N_WEBHOOK_CRM_GET_APPROVALS")
-        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
+        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -199,7 +168,7 @@ def register_tools(mcp):
     # ── Time Tracking ──────────────────────────────────────────────────────
 
     @mcp.tool()
-    def get_time_tracking(access_token: str, task_id: str) -> str:
+    async def get_time_tracking(access_token: str, task_id: str) -> str:
         """
         Retrieve time tracking entries for a specific task.
 
@@ -214,7 +183,7 @@ def register_tools(mcp):
             A summary of time logged with totals.
         """
         url = os.getenv("N8N_WEBHOOK_CRM_GET_TIME")
-        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
+        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 

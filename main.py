@@ -13,9 +13,24 @@ from pydantic import BaseModel
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 import logging
+import json as json_module
 
-# Configure Logging
-logging.basicConfig(level=logging.INFO)
+# Configure Structured JSON Logging
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        log = {
+            "ts": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0]:
+            log["error"] = self.formatException(record.exc_info)
+        return json_module.dumps(log)
+
+handler = logging.StreamHandler()
+handler.setFormatter(JSONFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger("main")
 
 # Imports
@@ -23,6 +38,7 @@ from app.graphs.supervisor import build_agent_graph
 from app.config import settings
 from app.mcp_client import mcp_client
 from app.security import SecurityService, RateLimiter
+from app.session_store import session_store
 
 # Global State
 app_state: Dict[str, Any] = {}
@@ -60,9 +76,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown: close connections gracefully
+    from mcp_server.shared.webhook_helper import _client as httpx_client
+    await httpx_client.aclose()
+    logger.info("Closed httpx connection pool")
     await mcp_client.disconnect()
-    logger.info("🛑 Server shutting down")
+    logger.info("Server shutting down")
 
 
 # Initialize FastAPI
@@ -98,9 +117,17 @@ def check_rate_limit(request: Request, user: Dict[str, Any] = Depends(get_curren
 
 # ── Data Models ──
 
+class ErrorResponse(BaseModel):
+    """Standardized error response."""
+    error: str
+    detail: str = ""
+    request_id: str = ""
+
+
 class ChatRequest(BaseModel):
     message: str
     thread_id: Optional[str] = None
+    session_id: str = ""    # Session ID for conversation memory
     access_token: str = ""  # API token forwarded to n8n webhooks via MCP tools
 
 
@@ -146,20 +173,25 @@ class N8NWebhookResponse(BaseModel):
 
 @api.post("/v1/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest, user: Dict[str, Any] = Depends(check_rate_limit)):
-    """Standard Chat Endpoint."""
+    """Standard Chat Endpoint with session memory."""
     graph: Any = app_state.get("graph")
     if not graph:
         raise HTTPException(status_code=503, detail="Agent not ready")
 
     request_id = str(uuid.uuid4())[:8]
     thread_id = req.thread_id or f"session_{user['email']}"
+    session_id = req.session_id or thread_id
     config = {"configurable": {"thread_id": thread_id}}
 
     # Sanitize input
     sanitized_message = SecurityService.sanitize_input(req.message)
 
+    # Load conversation history from session (if any)
+    history = session_store.load_history(session_id)
+    messages = history + [HumanMessage(content=sanitized_message)]
+
     initial_state = {
-        "messages": [HumanMessage(content=sanitized_message)],
+        "messages": messages,
         "user_id": user["email"],
         "user_email": user["email"],
         "user_role": user["role"],
@@ -173,6 +205,15 @@ async def chat_endpoint(req: ChatRequest, user: Dict[str, Any] = Depends(check_r
         result = await graph.ainvoke(initial_state, config=config)
         last_msg = result["messages"][-1].content
         logs = _extract_logs(result["messages"])
+
+        # Collect tools used
+        tools_used = []
+        for msg in result["messages"]:
+            if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
+                tools_used.extend([tc["name"] for tc in msg.tool_calls])
+
+        # Save this turn to session memory
+        session_store.save_turn(session_id, sanitized_message, last_msg, list(set(tools_used)))
 
         return ChatResponse(
             response=last_msg,
@@ -285,18 +326,53 @@ async def mcp_status():
 
 @api.get("/health")
 async def health_check():
-    return {"status": "healthy", "model": settings.GEMINI_MODEL, "version": "3.0.0"}
+    """Health check with MCP server probing."""
+    mcp_ok = False
+    mcp_tools = 0
+    try:
+        tools = await mcp_client.get_tools()
+        mcp_ok = True
+        mcp_tools = len(tools)
+    except Exception:
+        pass
+
+    graph_ok = app_state.get("graph") is not None
+    overall = "healthy" if (graph_ok and mcp_ok) else "degraded"
+
+    return {
+        "status": overall,
+        "model": settings.GEMINI_MODEL,
+        "version": "3.1.0",
+        "graph_ready": graph_ok,
+        "mcp_connected": mcp_ok,
+        "mcp_tools": mcp_tools,
+        "active_sessions": session_store.active_sessions(),
+    }
+
+
+@api.get("/v1/sessions/status")
+async def sessions_status():
+    """Check active session count."""
+    return {
+        "active_sessions": session_store.active_sessions(),
+        "ttl_seconds": 300,
+        "max_turns_per_session": 10,
+    }
 
 
 # ── n8n Webhook Endpoints ──
 
 async def _run_ai_query(graph, query: str, access_token: str, request_id: str, session_id: str = "") -> N8NWebhookResponse:
-    """Shared logic: runs a query through the supervisor graph."""
+    """Shared logic: runs a query through the supervisor graph with session memory."""
     thread_id = session_id or f"n8n_{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
 
+    # Load conversation history from session (if any)
+    history = session_store.load_history(session_id)
+    messages = history + [HumanMessage(content=query)]
+
     initial_state = {
-        "messages": [HumanMessage(content=query)],
+        "messages": messages,
         "user_id": "n8n-webhook",
         "user_email": "n8n@system",
         "user_role": "admin",
@@ -314,11 +390,15 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
         if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:
             tools_used.extend([tc["name"] for tc in msg.tool_calls])
 
-    logger.info(f"[{request_id}] Done. Tools: {list(set(tools_used))}")
+    unique_tools = list(set(tools_used))
+    logger.info(f"[{request_id}] Done. Tools: {unique_tools}")
+
+    # Save this turn to session memory
+    session_store.save_turn(session_id, query, answer, unique_tools)
 
     return N8NWebhookResponse(
         answer=answer,
-        tools_used=list(set(tools_used)),
+        tools_used=unique_tools,
         status="completed",
     )
 
@@ -417,31 +497,33 @@ async def _process_and_callback(
     graph, query: str, access_token: str, callback_url: str, request_id: str, session_id: str = ""
 ):
     """Background task: run AI query and POST result to n8n callback."""
-    import requests as http_requests
+    import httpx
 
     try:
         response = await _run_ai_query(graph, query, access_token, request_id, session_id)
         payload = response.model_dump()
 
         logger.info(f"[{request_id}] Sending callback → {callback_url}")
-        resp = http_requests.post(
-            callback_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=15,
-        )
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                callback_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=15,
+            )
         logger.info(f"[{request_id}] Callback sent: HTTP {resp.status_code}")
 
     except Exception as e:
         logger.error(f"[{request_id}] Async processing failed: {e}", exc_info=True)
         # Try to notify n8n about the error
         try:
-            http_requests.post(
-                callback_url,
-                json={"answer": f"Error: {e}", "status": "error", "tools_used": []},
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    callback_url,
+                    json={"answer": f"Error: {e}", "status": "error", "tools_used": []},
+                    headers={"Content-Type": "application/json"},
+                    timeout=10,
+                )
         except Exception:
             pass
 

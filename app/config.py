@@ -8,6 +8,7 @@ the cloud-platform scope, then passes them to vertexai.init().
 import os
 import logging
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from google.oauth2 import service_account
 
 logger = logging.getLogger(__name__)
@@ -33,9 +34,7 @@ class Settings(BaseSettings):
     MCP_CRM_URL: str = "http://127.0.0.1:8082/sse"
     MCP_AUTOMATION_URL: str = "http://127.0.0.1:8083/sse"
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
+    model_config = ConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()

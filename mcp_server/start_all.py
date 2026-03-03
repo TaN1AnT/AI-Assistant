@@ -5,7 +5,7 @@ Usage:  python -m mcp_server.start_all
 
 Starts:
   Knowledge  → Port 8081 (rag_search)
-  CRM        → Port 8082 (get_deals, get_tasks, etc.)
+  CRM        → Port 8082 (get_tasks, get_task_comments, etc.)
   Automation → Port 8083 (create_task, send_notification)
 
 Loads .env and passes all env vars to child processes so they

@@ -11,7 +11,7 @@ SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 GCS_BUCKET_URL = os.getenv("GCS_BUCKET_URL")
 
 # 3. Local path to the file or folder you want to upload
-LOCAL_PATH = "D:\AI_Orchestration\Кодекс Етики 2025.pdf"
+LOCAL_PATH = "D:\AI_Orchestration\documents"
 
 
 def upload_to_gcs(json_key, bucket_url, local_path):

@@ -97,7 +97,7 @@ def print_config(url):
     print(f"  Method:       POST")
     print(f"  Header:       X-Webhook-Secret: {secret}")
     print(f"  Body (JSON):")
-    print(f'  {{"query": "Your question here"}}')
+    print(f'  {{"message": "Your question here", "session_id": "chat-1"}}')
     print()
     print(f"  ── Test with curl ──")
     print(f'  curl -X POST {url}/v1/webhook/n8n ^')
