@@ -11,11 +11,9 @@ API Reference:
 """
 import os
 import logging
-from google.oauth2 import service_account
+from mcp_server.shared.llm_helper import generate_answer
 
 logger = logging.getLogger("mcp_server.knowledge.tools")
-
-SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 RAG_SYSTEM_PROMPT = (
     "Ти — корпоративний помічник знань, заснований на документації компанії.\n\n"
@@ -28,36 +26,89 @@ RAG_SYSTEM_PROMPT = (
 )
 
 
-_vertex_initialized = False
+# ── Vertex AI RAG Search ──────────────────────────────────────────────────
+
+_vertexai_initialized = False
 
 
-def _ensure_vertex_init():
-    """Lazy-init Vertex AI — only called on first RAG query."""
-    global _vertex_initialized
-    if _vertex_initialized:
+def _ensure_vertexai():
+    """Lazily initialize Vertex AI SDK on first use."""
+    global _vertexai_initialized
+    if _vertexai_initialized:
         return
 
+    from google.oauth2 import service_account
     import vertexai
 
+    SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
     creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
     project_id = os.getenv("GOOGLE_PROJECT_ID", "")
     location = os.getenv("GOOGLE_LOCATION", "europe-west4")
 
     credentials = None
     if creds_path and os.path.isfile(creds_path):
-        credentials = service_account.Credentials.from_service_account_file(
-            creds_path, scopes=SCOPES
+        try:
+            credentials = service_account.Credentials.from_service_account_file(
+                creds_path, scopes=SCOPES
+            )
+            logger.info(f"Knowledge: loaded SA {credentials.service_account_email}")
+        except Exception as e:
+            logger.error(f"Knowledge: failed to load SA: {e}")
+
+    vertexai.init(project=project_id, location=location, credentials=credentials)
+    _vertexai_initialized = True
+    logger.info("Knowledge: Vertex AI initialized")
+
+
+def _rag_retrieve(query: str) -> str:
+    """
+    Queries the Vertex AI RAG corpus and returns formatted context.
+    """
+    _ensure_vertexai()
+
+    corpus_id = os.getenv("VERTEX_RAG_CORPUS_ID", "")
+    if not corpus_id:
+        return "Error: VERTEX_RAG_CORPUS_ID is not configured."
+
+    try:
+        from vertexai import rag
+
+        response = rag.retrieval_query(
+            rag_resources=[rag.RagResource(rag_corpus=corpus_id)],
+            text=query,
+            rag_retrieval_config=rag.RagRetrievalConfig(
+                top_k=10,
+                filter=rag.utils.resources.Filter(vector_distance_threshold=0.5),
+            ),
         )
-        logger.info(f"Knowledge: SA {credentials.service_account_email}")
 
-    vertexai.init(
-        project=project_id,
-        location=location,
-        credentials=credentials,
-    )
-    _vertex_initialized = True
-    logger.info("Vertex AI initialized for RAG")
+        contexts = []
+        if response.contexts and response.contexts.contexts:
+            for ctx in response.contexts.contexts:
+                source = getattr(ctx, "source_uri", "") or ""
+                text = getattr(ctx, "text", "") or ""
+                if text:
+                    contexts.append({"text": text, "source": source})
 
+        if not contexts:
+            return "No relevant documents found in the knowledge base."
+
+        # Format contexts for the LLM
+        parts = []
+        for chunk in contexts:
+            if chunk["source"]:
+                parts.append(f"[Джерело: {chunk['source']}]\n{chunk['text']}")
+            else:
+                parts.append(chunk["text"])
+
+        return "\n\n---\n\n".join(parts)
+
+    except Exception as e:
+        logger.error(f"RAG retrieval error: {e}", exc_info=True)
+        return f"Error: RAG search failed: {type(e).__name__}: {e}"
+
+
+# ── Tool registration ──────────────────────────────────────────────────────
 
 def register_tools(mcp):
     """Register knowledge-domain tools."""
@@ -68,65 +119,11 @@ def register_tools(mcp):
         Search the company knowledge base (policies, docs, guides)
         and return a grounded answer.
 
-        Use when the user asks about:
-        - Company policies, procedures, rules
-        - Product documentation
-        - Internal how-to guides
-
-        Supports queries in any language including Ukrainian.
-
-        Args:
-            query: The question to search for (any language).
-
-        Returns:
-            A sourced answer from internal documents.
+        Use when the user asks about policies, product docs, or guides.
         """
-        corpus_id = os.getenv("VERTEX_RAG_CORPUS_ID", "")
-        if not corpus_id:
-            return "Error: RAG corpus not configured (VERTEX_RAG_CORPUS_ID missing)."
+        raw = _rag_retrieve(query)
 
-        try:
-            # Lazy-init Vertex AI on first call
-            _ensure_vertex_init()
+        if raw.startswith("Error:"):
+            return raw
 
-            from vertexai import rag
-
-            # Vertex AI RAG Engine API v1
-            response = rag.retrieval_query(
-                rag_resources=[
-                    rag.RagResource(
-                        rag_corpus=corpus_id,
-                    )
-                ],
-                text=query,
-                rag_retrieval_config=rag.RagRetrievalConfig(
-                    top_k=10,
-                    filter=rag.utils.resources.Filter(
-                        vector_distance_threshold=0.5,
-                    ),
-                ),
-            )
-
-            # Extract text contexts
-            contexts = []
-            if response.contexts and response.contexts.contexts:
-                for ctx in response.contexts.contexts:
-                    source = getattr(ctx, "source_uri", "") or ""
-                    text = getattr(ctx, "text", "") or ""
-                    if text:
-                        if source:
-                            contexts.append(f"[Джерело: {source}]\n{text}")
-                        else:
-                            contexts.append(text)
-
-            if not contexts:
-                return f"Не знайдено релевантних документів за запитом: '{query}'"
-
-            docs_text = "\n\n---\n\n".join(contexts)
-
-            from mcp_server.shared.llm_helper import generate_answer
-            return generate_answer(RAG_SYSTEM_PROMPT, docs_text, query)
-
-        except Exception as e:
-            logger.error(f"RAG search failed: {e}", exc_info=True)
-            return f"Error: {type(e).__name__}: {e}"
+        return generate_answer(RAG_SYSTEM_PROMPT, raw, query)

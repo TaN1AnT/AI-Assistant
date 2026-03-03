@@ -3,7 +3,7 @@ Automation Tools — Webhook-proxy tools for triggering actions.
 
 Each tool:
 1. Accepts access_token + action parameters from the LangGraph agent.
-2. POSTs a JSON payload to the N8N_WEBHOOK_AUTOMATION webhook.
+2. POSTs a JSON payload to a dedicated n8n webhook URL (from .env).
 3. n8n executes the action (create ticket, send notification, etc.).
 4. Receives the JSON response from n8n.
 5. Uses Gemini (via llm_helper) to format a confirmation message.
@@ -18,24 +18,23 @@ logger = logging.getLogger("mcp_server.automation.tools")
 
 # ── Shared webhook caller ──────────────────────────────────────────────────
 
-def _call_n8n_automation(action: str, token: str, data: dict) -> str:
+def _call_n8n_automation(webhook_url: str, token: str, data: dict) -> str:
     """
-    Sends a request to the Automation n8n webhook.
+    Sends a request to a specific Automation n8n webhook.
 
     Args:
-        action: The action identifier (e.g. 'create_task', 'send_notification').
-        token:  The user's access token, forwarded to n8n for API auth.
-        data:   Action-specific data payload.
+        webhook_url: The specific URL for the automation action.
+        token:       The user's access token, forwarded to n8n for API auth.
+        data:        Action-specific data payload.
 
     Returns:
         Raw JSON string from n8n, or an error message.
     """
-    webhook_url = os.getenv("N8N_WEBHOOK_AUTOMATION", "")
     if not webhook_url:
-        return "Error: N8N_WEBHOOK_AUTOMATION is not configured."
+        return "Error: Webhook URL is not configured in .env."
 
     secret = os.getenv("N8N_WEBHOOK_SECRET", "")
-    payload = {"action": action, "token": token, "data": data}
+    payload = {"token": token, "data": data}
     headers = {"Content-Type": "application/json", "X-Webhook-Secret": secret}
 
     try:
@@ -45,7 +44,7 @@ def _call_n8n_automation(action: str, token: str, data: dict) -> str:
     except requests.Timeout:
         return "Error: Automation webhook timed out (30s)."
     except requests.ConnectionError:
-        return "Error: Cannot reach n8n. Check N8N_WEBHOOK_AUTOMATION."
+        return f"Error: Cannot reach n8n at {webhook_url}."
     except requests.HTTPError as e:
         code = e.response.status_code if e.response else "?"
         body = e.response.text[:300] if e.response else ""
@@ -76,7 +75,8 @@ def register_tools(mcp):
         Returns:
             Confirmation with the new task details.
         """
-        raw = _call_n8n_automation("create_task", access_token, {
+        url = os.getenv("N8N_WEBHOOK_AUTOMATION_CREATE_TASK")
+        raw = _call_n8n_automation(url, access_token, {
             "deal_id": deal_id,
             "title": title,
             "description": description,
@@ -105,7 +105,8 @@ def register_tools(mcp):
         Returns:
             Confirmation that the notification was sent.
         """
-        raw = _call_n8n_automation("send_notification", access_token, {
+        url = os.getenv("N8N_WEBHOOK_AUTOMATION_SEND_NOTIFICATION")
+        raw = _call_n8n_automation(url, access_token, {
             "recipient": recipient,
             "message": message,
             "channel": channel,

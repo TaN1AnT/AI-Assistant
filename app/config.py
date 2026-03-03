@@ -25,9 +25,7 @@ class Settings(BaseSettings):
     # ── LLM Model ──
     GEMINI_MODEL: str = "gemini-2.5-flash-lite"
 
-    # ── n8n Webhooks (one per domain) ──
-    N8N_WEBHOOK_CRM: str = ""           # CRM queries (get_deals, get_tasks, etc.)
-    N8N_WEBHOOK_AUTOMATION: str = ""    # Actions (create_task, send_notification)
+    # ── n8n ──
     N8N_WEBHOOK_SECRET: str = ""
 
     # ── MCP Server URLs ──

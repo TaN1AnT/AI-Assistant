@@ -12,6 +12,7 @@ import logging
 from google.oauth2 import service_account
 from langchain_google_vertexai import ChatVertexAI
 from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.rate_limiters import InMemoryRateLimiter
 
 logger = logging.getLogger("mcp_server.shared.llm_helper")
 
@@ -19,8 +20,11 @@ SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
 _CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
 _PROJECT = os.getenv("GOOGLE_PROJECT_ID", "")
-_LOCATION = os.getenv("GOOGLE_LOCATION", "europe-central2")
+_LOCATION = os.getenv("GOOGLE_LOCATION", "europe-west4")
 _MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+
+# Allow ~60 requests per minute (1 per second)
+_rate_limiter = InMemoryRateLimiter(requests_per_minute=180, check_every_n_seconds=0.1, max_bucket_size=10)
 
 # Load service account credentials
 _credentials = None
@@ -43,6 +47,7 @@ def get_llm(temperature: float = 0.2) -> ChatVertexAI:
         location=_LOCATION,
         temperature=temperature,
         max_retries=3,
+        rate_limiter=_rate_limiter,
     )
     if _credentials:
         kwargs["credentials"] = _credentials

@@ -18,24 +18,23 @@ logger = logging.getLogger("mcp_server.crm.tools")
 
 # ── Shared webhook caller ──────────────────────────────────────────────────
 
-def _call_n8n_crm(action: str, token: str, params: dict) -> str:
+def _call_n8n_crm(webhook_url: str, token: str, params: dict) -> str:
     """
-    Sends a request to the CRM n8n webhook.
+    Sends a request to a specific CRM n8n webhook.
 
     Args:
-        action: The action identifier (e.g. 'get_deals', 'get_tasks').
-        token:  The user's access token, forwarded to n8n for API auth.
-        params: Additional parameters for this specific action.
+        webhook_url: The specific URL for the CRM action.
+        token:       The user's access token, forwarded to n8n for API auth.
+        params:      Additional parameters for the request.
 
     Returns:
         Raw JSON string from n8n, or an error message.
     """
-    webhook_url = os.getenv("N8N_WEBHOOK_CRM", "")
     if not webhook_url:
-        return "Error: N8N_WEBHOOK_CRM is not configured."
+        return "Error: Webhook URL is not configured in .env."
 
     secret = os.getenv("N8N_WEBHOOK_SECRET", "")
-    payload = {"action": action, "token": token, **params}
+    payload = {"token": token, **params}
     headers = {"Content-Type": "application/json", "X-Webhook-Secret": secret}
 
     try:
@@ -45,7 +44,7 @@ def _call_n8n_crm(action: str, token: str, params: dict) -> str:
     except requests.Timeout:
         return "Error: CRM webhook timed out (30s)."
     except requests.ConnectionError:
-        return "Error: Cannot reach n8n. Check N8N_WEBHOOK_CRM."
+        return f"Error: Cannot reach n8n at {webhook_url}."
     except requests.HTTPError as e:
         code = e.response.status_code if e.response else "?"
         body = e.response.text[:300] if e.response else ""
@@ -61,30 +60,6 @@ def register_tools(mcp):
     """Register CRM query tools with the MCP server."""
 
     @mcp.tool()
-    def get_deals(access_token: str, status_filter: str = "all") -> str:
-        """
-        Retrieve deals from the CRM system.
-
-        Use when the user asks about deals, pipeline, revenue, or sales data.
-
-        Args:
-            access_token: API token for authenticating the CRM request.
-            status_filter: Filter by deal status: 'open', 'won', 'lost', or 'all'.
-
-        Returns:
-            A formatted summary of matching deals.
-        """
-        raw = _call_n8n_crm("get_deals", access_token, {"status": status_filter})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "You are a sales analyst. Summarize the deals as a numbered list. "
-            "Format currency as $X,XXX. If empty, say 'No deals found.'",
-            raw, f"Get deals with status: {status_filter}"
-        )
-
-    @mcp.tool()
     def get_tasks(access_token: str, deal_id: str) -> str:
         """
         Retrieve tasks linked to a specific deal.
@@ -98,7 +73,8 @@ def register_tools(mcp):
         Returns:
             A formatted list of tasks.
         """
-        raw = _call_n8n_crm("get_tasks", access_token, {"deal_id": deal_id})
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_TASKS")
+        raw = _call_n8n_crm(url, access_token, {"deal_id": deal_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -122,7 +98,8 @@ def register_tools(mcp):
         Returns:
             A chronological summary of the comment thread.
         """
-        raw = _call_n8n_crm("get_comments", access_token, {"task_id": task_id})
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_COMMENTS")
+        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -149,7 +126,8 @@ def register_tools(mcp):
         Returns:
             A formatted list of checklist items with their completion status.
         """
-        raw = _call_n8n_crm("get_checklists", access_token, {"task_id": task_id})
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_CHECKLISTS")
+        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -177,7 +155,8 @@ def register_tools(mcp):
         Returns:
             A formatted list of subtasks with status and assignee.
         """
-        raw = _call_n8n_crm("get_subtasks", access_token, {"task_id": task_id})
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_SUBTASKS")
+        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -205,7 +184,8 @@ def register_tools(mcp):
         Returns:
             A summary of approval statuses per approver.
         """
-        raw = _call_n8n_crm("get_approvals", access_token, {"task_id": task_id})
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_APPROVALS")
+        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 
@@ -233,7 +213,8 @@ def register_tools(mcp):
         Returns:
             A summary of time logged with totals.
         """
-        raw = _call_n8n_crm("get_time_tracking", access_token, {"task_id": task_id})
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_TIME")
+        raw = _call_n8n_crm(url, access_token, {"task_id": task_id})
         if raw.startswith("Error:"):
             return raw
 

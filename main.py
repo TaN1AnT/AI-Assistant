@@ -53,7 +53,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Failed to build agent graph: {e}", exc_info=True)
         # Fallback: import the basic workflow
-        from app.graphs.supervisor import workflow as fallback_workflow
+        from app.graphs.supervisor import _fallback_workflow as fallback_workflow
         checkpointer = MemorySaver()
         app_state["graph"] = fallback_workflow.compile(checkpointer=checkpointer)
         logger.warning("⚠️ Using fallback graph without MCP tools")

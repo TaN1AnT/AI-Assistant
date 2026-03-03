@@ -26,7 +26,7 @@ from app.graphs.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 2
+MAX_ITERATIONS = 3
 
 # ── System Prompt ──────────────────────────────────────────────────────────
 
@@ -38,7 +38,6 @@ AVAILABLE TOOLS:
 - `rag_search(query)` — Search policies, docs, how-to guides.
 
 **CRM Server** (business data via n8n):
-- `get_deals(access_token, status_filter)` — List deals. Filters: 'open', 'won', 'lost', 'all'.
 - `get_tasks(access_token, deal_id)` — List tasks for a deal.
 - `get_task_comments(access_token, task_id)` — Get comments on a task.
 - `get_checklists(access_token, task_id)` — Get checklist items for a task.
@@ -54,11 +53,10 @@ CRITICAL RULES:
 1. For ALL CRM and Automation tools, you MUST pass this access_token: `{access_token}`
 2. Always use the appropriate tool. NEVER guess answers — always call a tool first.
 3. For multi-step questions, call tools sequentially until you have ALL the info needed.
-4. If the user asks about a deal AND its tasks, call BOTH get_deals AND get_tasks.
-5. If you need related data (e.g. comments on a task, subtasks), fetch it proactively.
-6. Present tool results clearly and professionally.
-7. If a tool returns an error, explain it and suggest alternatives.
-8. Never expose API keys, tokens, or webhook URLs in your responses."""
+4. If you need related data (e.g. comments on a task, subtasks), fetch it proactively.
+5. Present tool results clearly and professionally.
+6. If a tool returns an error, explain it and suggest alternatives.
+7. Never expose API keys, tokens, or webhook URLs in your responses."""
 
 
 # ── Validation Prompt ──────────────────────────────────────────────────────
@@ -197,7 +195,7 @@ async def build_agent_graph():
         If COMPLETE → END the graph.
         """
         validation = state.get("_validation", "COMPLETE")
-        if validation == "INCOMPLETE":
+        if validation.startswith("INCOMPLETE"):
             return "loop"
         return END
 
@@ -217,8 +215,11 @@ async def build_agent_graph():
         "validate": "validator",
     })
 
+
+
     # After tools: always go back to supervisor
     workflow.add_edge("tools", "supervisor")
+
 
     # After validator: loop back or end
     workflow.add_conditional_edges("validator", should_loop, {
