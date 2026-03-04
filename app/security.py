@@ -18,8 +18,8 @@ MOCK_USERS = {
         "email": "admin@example.com",
         "role": "admin",
         "permissions": [
-            "view_all_deals", "create_ticket", "update_deal",
-            "delete_contact", "send_notification", "manage_tickets",
+            "view_tasks", "create_ticket", "manage_tasks",
+            "delete_contact", "send_notification",
             "query_crm", "rag_search",
         ],
     },
@@ -27,7 +27,7 @@ MOCK_USERS = {
         "email": "sales@example.com",
         "role": "sales_rep",
         "permissions": [
-            "view_own_deals", "create_ticket", "update_deal",
+            "view_tasks", "create_ticket", "manage_tasks",
             "send_notification", "query_crm", "rag_search",
         ],
     },

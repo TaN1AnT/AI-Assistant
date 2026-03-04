@@ -33,21 +33,15 @@ def _make_mock_httpx_response(data, status_code=200):
 
 class TestCRME2E(unittest.IsolatedAsyncioTestCase):
     """
-    E2E test for CRM integration with async httpx and ChatGoogleGenerativeAI.
-    Simulates:
-    1. User Request (via async webhook)
-    2. Background Processing (_process_and_callback)
-    3. Supervisor Node Tool Selection
-    4. Tool Node Execution -> n8n Webhook (Mocked via httpx)
-    5. Final Answer Generation
-    6. POST result to Callback URL (Mocked via httpx)
+    E2E test for CRM integration.
+    Simulates the full flow: query → supervisor → CRM tool → n8n → callback.
+    Uses get_subtasks (task-level tool) since deals were removed.
     """
 
     @patch("app.utils.ChatGoogleGenerativeAI")
     async def test_crm_full_process_with_callback(self, mock_chat_class):
         """
         Tests the full background process including the final callback to n8n.
-        Uses get_tasks (CRM tool) since get_deals has been removed.
         """
         from app.graphs.supervisor import build_agent_graph
         from main import _process_and_callback
@@ -63,42 +57,36 @@ class TestCRME2E(unittest.IsolatedAsyncioTestCase):
         mock_llm_instance.bind_tools.return_value = mock_llm_instance
 
         resp_step1 = AIMessage(
-            content="Fetching tasks for the deal...",
+            content="Fetching subtasks...",
             tool_calls=[{
-                "name": "get_tasks",
-                "args": {"access_token": "token_abc", "deal_id": "DEAL-42"},
-                "id": "call_tasks_01"
+                "name": "get_subtasks",
+                "args": {"access_token": "token_abc", "task_id": "T-501"},
+                "id": "call_subtasks_01"
             }]
         )
-        resp_step2 = AIMessage(content="I have processed the CRM data. Here is your task report.")
+        resp_step2 = AIMessage(content="Task T-501 has 3 subtasks. Here is the breakdown.")
         resp_validator = AIMessage(content="COMPLETE")
 
         mock_ainvoke.side_effect = [resp_step1, resp_step2, resp_validator]
         mock_llm_instance.invoke.return_value = AIMessage(content="Processed tool data.")
 
         # --- 2. SETUP MOCK HTTPX ---
-        MOCK_TASKS = [
-            {"id": "T-101", "title": "Review PR", "status": "in_progress", "assignee": "dev@co.com"},
-            {"id": "T-102", "title": "Deploy staging", "status": "todo", "assignee": "ops@co.com"},
+        MOCK_SUBTASKS = [
+            {"id": "ST-1", "title": "Design review", "status": "done", "assignee": "dev@co.com"},
+            {"id": "ST-2", "title": "Implementation", "status": "in_progress", "assignee": "dev2@co.com"},
+            {"id": "ST-3", "title": "QA testing", "status": "todo", "assignee": "qa@co.com"},
         ]
 
         posted_urls = []
 
         async def mock_httpx_post(url, **kwargs):
             posted_urls.append(url)
-            if "crm/tasks" in url:
-                return _make_mock_httpx_response(MOCK_TASKS)
+            if "crm" in url and "subtasks" in url:
+                return _make_mock_httpx_response(MOCK_SUBTASKS)
             return _make_mock_httpx_response({"status": "ok"})
 
-        # Mock the shared webhook helper's global client
         mock_webhook_client = MagicMock()
         mock_webhook_client.post = AsyncMock(side_effect=mock_httpx_post)
-
-        # Mock httpx.AsyncClient for the callback in _process_and_callback
-        mock_callback_client = MagicMock()
-        mock_callback_client.post = AsyncMock(side_effect=mock_httpx_post)
-        mock_callback_client.__aenter__ = AsyncMock(return_value=mock_callback_client)
-        mock_callback_client.__aexit__ = AsyncMock(return_value=False)
 
         # --- 3. SETUP REAL CRM TOOLS ---
         from mcp_server.crm.tools import register_tools as register_crm_tools
@@ -115,26 +103,26 @@ class TestCRME2E(unittest.IsolatedAsyncioTestCase):
         mock_mcp = MockMCP()
         register_crm_tools(mock_mcp)
 
-        real_get_tasks = mock_mcp.tools["get_tasks"]
+        real_get_subtasks = mock_mcp.tools["get_subtasks"]
         mock_tools = [
             StructuredTool.from_function(
-                coroutine=real_get_tasks,
-                name="get_tasks",
-                description="Get tasks for a deal"
+                coroutine=real_get_subtasks,
+                name="get_subtasks",
+                description="Get subtasks for a task"
             ),
         ]
 
-        os.environ["N8N_WEBHOOK_CRM_GET_TASKS"] = "https://n8n.modern-expo.com/webhook/crm/tasks"
+        os.environ["N8N_WEBHOOK_CRM_GET_SUBTASKS"] = "https://n8n.modern-expo.com/webhook/crm/subtasks"
 
+        # Both CRM tools and callback now use the same shared httpx client
         with patch.object(mcp_client, "get_tools", return_value=mock_tools), \
-             patch("mcp_server.shared.webhook_helper._client", mock_webhook_client), \
-             patch("httpx.AsyncClient", return_value=mock_callback_client):
+             patch("mcp_server.shared.webhook_helper._client", mock_webhook_client):
 
             agent_workflow = await build_agent_graph()
             graph = agent_workflow.compile()
 
             # --- 4. EXECUTE FULL BACKGROUND FLOW ---
-            USER_QUERY = "What are the tasks for deal DEAL-42?"
+            USER_QUERY = "What are the subtasks for task T-501?"
             ACCESS_TOKEN = "token_abc"
             CALLBACK_URL = "https://n8n.internal/webhook/my-callback"
             REQUEST_ID = "req-e2e-999"
@@ -153,26 +141,25 @@ class TestCRME2E(unittest.IsolatedAsyncioTestCase):
         logger.info("Verifying final outcomes...")
         logger.info(f"POSTed URLs: {posted_urls}")
 
-        # A. Verify n8n CRM Webhook was called
-        self.assertTrue(any("webhook/crm/tasks" in u for u in posted_urls), "Tasks webhook should be called")
-
-        # B. Verify Callback was sent
+        self.assertTrue(any("crm" in u and "subtasks" in u for u in posted_urls), "Subtasks webhook should be called")
         self.assertTrue(any(CALLBACK_URL in u for u in posted_urls), "Final callback should be sent")
 
-        # C. Verify callback payload
         callback_call = None
-        for call in mock_callback_client.post.call_args_list:
+        for call in mock_webhook_client.post.call_args_list:
             args, kwargs = call
             if CALLBACK_URL in args[0]:
                 callback_call = kwargs
                 break
 
-        self.assertIsNotNone(callback_call)
+        self.assertIsNotNone(callback_call, "Callback should be sent via shared httpx client")
         payload = callback_call.get("json", {})
         self.assertEqual(payload.get("status"), "completed")
-        self.assertIn("get_tasks", payload.get("tools_used", []))
+        self.assertIn("get_subtasks", payload.get("tools_used", []))
+        # Verify new execution metrics are present
+        self.assertGreater(payload.get("execution_time_ms", 0), 0)
+        self.assertGreater(payload.get("tools_called_count", 0), 0)
 
-        logger.info("Full CRM E2E process with REAL tool logic: PASSED")
+        logger.info("Full CRM E2E process: PASSED")
 
 if __name__ == "__main__":
     unittest.main()

@@ -15,9 +15,9 @@ Flow:
 6. should_loop: If validator says INCOMPLETE → back to supervisor. If COMPLETE → END.
 7. Max 10 iterations to prevent infinite loops.
 """
+import asyncio
 from langgraph.graph import StateGraph, END, START
-from langgraph.prebuilt import ToolNode
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage, ToolMessage
 import logging
 
 from app.utils import get_gemini_llm
@@ -26,56 +26,58 @@ from app.graphs.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 3
+MAX_ITERATIONS = 6
 
 # ── System Prompt ──────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT_TEMPLATE = """You are an Enterprise AI Assistant with access to specialized tools.
+SYSTEM_PROMPT_TEMPLATE = """You are an Enterprise AI Assistant. Gather raw data via tools, then synthesize one clear answer.
 
-AVAILABLE TOOLS:
+TOOLS (CRM tools return raw JSON — interpret it, never show raw JSON):
+- rag_search(query) — search internal docs
+- get_task_comments(access_token, task_id) — comments on a task
+- get_checklists(access_token, task_id) — checklist items
+- get_subtasks(access_token, task_id) — child tasks
+- get_approvals(access_token, task_id) — approval statuses
+- get_time_tracking(access_token, task_id) — time entries
+- create_task(access_token, title, description) — create task
+- send_notification(access_token, recipient, message, channel) — notify
 
-**Knowledge Server** (internal documents):
-- `rag_search(query)` — Search policies, docs, how-to guides.
+RULES:
+1. access_token for all CRM/Automation calls: `{access_token}`
+2. Call multiple tools in parallel when possible.
+3. For summaries/reports: call ALL relevant tools at once.
+4. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
+5. Never expose tokens or URLs.
 
-**CRM Server** (business data via n8n):
-- `get_tasks(access_token, deal_id)` — List tasks for a deal.
-- `get_task_comments(access_token, task_id)` — Get comments on a task.
-- `get_checklists(access_token, task_id)` — Get checklist items for a task.
-- `get_subtasks(access_token, task_id)` — Get subtasks (child tasks) for a task.
-- `get_approvals(access_token, task_id)` — Get approval statuses for a task.
-- `get_time_tracking(access_token, task_id)` — Get time entries logged on a task.
-
-**Automation Server** (actions via n8n):
-- `create_task(access_token, deal_id, title, description)` — Create a new task.
-- `send_notification(access_token, recipient, message, channel)` — Send email/Slack/SMS.
-
-CRITICAL RULES:
-1. For ALL CRM and Automation tools, you MUST pass this access_token: `{access_token}`
-2. Always use the appropriate tool. NEVER guess answers — always call a tool first.
-3. For multi-step questions, call tools sequentially until you have ALL the info needed.
-4. If you need related data (e.g. comments on a task, subtasks), fetch it proactively.
-5. Present tool results clearly and professionally.
-6. If a tool returns an error, explain it and suggest alternatives.
-7. Never expose API keys, tokens, or webhook URLs in your responses."""
+DECOMPOSITION TEMPLATE:
+- Simple (1 data point): call 1 tool → answer.
+- Status/progress: get_subtasks + get_checklists (parallel).
+- Blocked/ready check: get_subtasks + get_approvals + get_checklists (parallel).
+- Full summary/report: get_subtasks + get_checklists + get_task_comments + get_approvals + get_time_tracking (all parallel).
+- Multiple tasks: call the same tool for each task_id in parallel."""
 
 
 # ── Validation Prompt ──────────────────────────────────────────────────────
 
 VALIDATION_PROMPT = """Review the conversation above. The user's original question is in the first HumanMessage.
 
-You have gathered some data via tool calls. Now evaluate:
+You have gathered raw data via tool calls. Evaluate completeness:
 
-1. Does the data you collected FULLY answer the user's question?
-2. Is there any MISSING information that requires additional tool calls?
+1. Does the collected data FULLY answer the user's question?
+2. Is there MISSING information that requires additional tool calls?
 
-Examples of incomplete answers:
-- User asked about a deal's tasks AND comments, but you only fetched tasks.
-- User asked for a full report on a deal, but you didn't fetch subtasks or checklists.
-- User asked about time spent, but you didn't call get_time_tracking.
+Common patterns that indicate INCOMPLETENESS:
+- User asked for a "summary" or "overview" of a task but only 1-2 data types were fetched.
+  A proper task summary needs at minimum: subtasks + checklists + comments + approvals.
+- User asked about "status" or "progress" but subtasks or checklists were not fetched.
+- User mentioned time/hours but get_time_tracking was not called.
+- User asked about approvals/sign-offs but get_approvals was not called.
+- User asked about multiple tasks but data for some tasks was not fetched.
+- User asked "is task ready?" but approvals + subtasks + checklists were not all checked.
 
 Respond with EXACTLY one of:
 - "COMPLETE" — if all necessary information has been gathered.
-- "INCOMPLETE: <reason>" — if more tool calls are needed. Explain what's missing.
+- "INCOMPLETE: <reason>" — if more tool calls are needed. List the SPECIFIC tools to call.
 
 Do NOT generate a final answer. Only evaluate completeness."""
 
@@ -105,6 +107,9 @@ async def build_agent_graph():
 
     # ── Node: Supervisor ───────────────────────────────────────────────
 
+    # ── Build tool lookup for safe_tool_node ─────────────────────────
+    tool_map = {t.name: t for t in tools} if tools else {}
+
     async def supervisor_node(state: AgentState):
         """
         The agent brain. Uses LLM to decide which tool(s) to call next.
@@ -113,6 +118,7 @@ async def build_agent_graph():
         """
         messages = state["messages"]
         token = state.get("access_token", "NOT_PROVIDED")
+        req_id = state.get("request_id", "")
         iteration = state.get("_iteration", 0) + 1
 
         system_prompt = SYSTEM_PROMPT_TEMPLATE.format(access_token=token)
@@ -122,12 +128,53 @@ async def build_agent_graph():
 
         # Add a cooling sleep to mitigate rate-limiting if we are deep in the loop
         if iteration > 2:
-            import asyncio
             await asyncio.sleep(1)
 
         response = await llm_with_tools.ainvoke(messages)
 
+        if response.tool_calls:
+            tool_names = [tc["name"] for tc in response.tool_calls]
+            logger.info(f"[{req_id}] Supervisor (iter {iteration}): calling {tool_names}")
+        else:
+            logger.info(f"[{req_id}] Supervisor (iter {iteration}): no tools, moving to validation")
+
         return {"messages": [response], "_iteration": iteration}
+
+    # ── Node: Safe Tool Node (error-isolated) ──────────────────────────
+
+    async def safe_tool_node(state: AgentState):
+        """
+        Custom tool node that executes each tool call independently.
+        If one tool fails, others still return their results.
+        Failed tools return a ToolMessage with the error so the
+        supervisor can continue with partial data.
+        """
+        last_msg = state["messages"][-1]
+        req_id = state.get("request_id", "")
+
+        if not isinstance(last_msg, AIMessage) or not last_msg.tool_calls:
+            return {"messages": []}
+
+        async def _run_one(tc):
+            name = tc["name"]
+            call_id = tc["id"]
+            try:
+                tool = tool_map.get(name)
+                if not tool:
+                    return ToolMessage(content=f"Error: Unknown tool '{name}'", tool_call_id=call_id)
+                result = await tool.ainvoke(tc["args"])
+                return ToolMessage(content=str(result), tool_call_id=call_id)
+            except Exception as e:
+                logger.error(f"[{req_id}] Tool '{name}' failed: {e}")
+                return ToolMessage(content=f"Error: {type(e).__name__}: {e}", tool_call_id=call_id)
+
+        # Run ALL tool calls in parallel
+        results = await asyncio.gather(
+            *[_run_one(tc) for tc in last_msg.tool_calls]
+        )
+
+        logger.info(f"[{req_id}] Tools completed: {len(results)} results")
+        return {"messages": list(results)}
 
     # ── Node: Validator ────────────────────────────────────────────────
 
@@ -156,7 +203,8 @@ async def build_agent_graph():
         response = await llm_validator.ainvoke(validation_messages)
         verdict = response.content.strip()
 
-        logger.info(f"Validator (iter {iteration}): {verdict[:80]}")
+        req_id = state.get("request_id", "")
+        logger.info(f"[{req_id}] Validator (iter {iteration}): {verdict[:80]}")
 
         if verdict.startswith("COMPLETE"):
             return {"_validation": "COMPLETE"}
@@ -204,7 +252,7 @@ async def build_agent_graph():
     workflow = StateGraph(AgentState)
 
     workflow.add_node("supervisor", supervisor_node)
-    workflow.add_node("tools", ToolNode(tools))
+    workflow.add_node("tools", safe_tool_node)
     workflow.add_node("validator", validator_node)
 
     workflow.add_edge(START, "supervisor")

@@ -99,9 +99,9 @@ async def _build_test_graph(mcp_client):
 
     mock_tools = [
         StructuredTool.from_function(
-            coroutine=mock_mcp.tools["get_tasks"],
-            name="get_tasks",
-            description="Get tasks for a deal"
+            coroutine=mock_mcp.tools["get_subtasks"],
+            name="get_subtasks",
+            description="Get subtasks for a task"
         ),
     ]
 

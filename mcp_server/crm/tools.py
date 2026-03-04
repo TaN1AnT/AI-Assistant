@@ -1,26 +1,87 @@
 """
-CRM Tools — Webhook-proxy tools for querying business data.
+CRM Tools — Raw data fetchers for querying business data.
 
 Each tool:
 1. Accepts access_token + query parameters from the LangGraph agent.
-2. POSTs a JSON payload to a DEDICATED n8n webhook URL (from .env).
-3. n8n uses the token to call the real CRM HTTP API.
-4. Receives the JSON response from n8n.
-5. Uses Gemini (via llm_helper) to format a human-readable answer.
+2. POSTs to a dedicated n8n webhook URL (from .env) via async httpx.
+3. Returns the RAW JSON response from n8n (no LLM formatting).
+
+The supervisor LLM is responsible for:
+- Deciding which tools to call (and in what order)
+- Calling multiple tools for complex requests
+- Generating ONE final answer from all accumulated raw data
+
+═══════════════════════════════════════════════════════════════
+DECOMPOSITION GUIDE — How the supervisor breaks down requests
+═══════════════════════════════════════════════════════════════
+
+The supervisor LLM reads the user's question and decides which
+raw data tools to call. Here are common decomposition patterns:
+
+Simple requests (1 tool call):
+  "Show me the subtasks for T-501"
+    → get_subtasks(task_id="T-501")
+
+  "Who approved task T-501?"
+    → get_approvals(task_id="T-501")
+
+  "How much time was logged on T-501?"
+    → get_time_tracking(task_id="T-501")
+
+Medium requests (2-3 tool calls):
+  "What's the status of task T-501?"
+    → get_subtasks + get_checklists
+      (progress = subtask completion + checklist completion)
+
+  "Is task T-501 blocked?"
+    → get_subtasks + get_approvals + get_task_comments
+      (check pending approvals, stalled subtasks, blocking comments)
+
+  "Show me task T-501 progress with discussion"
+    → get_subtasks + get_checklists + get_task_comments
+
+Complex requests (4-5 tool calls):
+  "Give me a full summary of task T-501"
+    → get_task_comments + get_subtasks + get_checklists
+      + get_approvals + get_time_tracking
+
+  "Prepare a status report for task T-501"
+    → get_subtasks + get_checklists + get_approvals
+      + get_time_tracking + get_task_comments
+
+  "What work has been done on T-501 and what's left?"
+    → get_subtasks + get_checklists + get_time_tracking
+      + get_task_comments
+
+Cross-task requests (multiple task IDs):
+  "Compare progress on T-501 and T-502"
+    → get_subtasks(T-501) + get_subtasks(T-502)
+      + get_checklists(T-501) + get_checklists(T-502)
+
+  "Which tasks have pending approvals: T-501, T-502, T-503?"
+    → get_approvals(T-501) + get_approvals(T-502)
+      + get_approvals(T-503)
+
+Time & resource analysis:
+  "How much time did the team spend on T-501?"
+    → get_time_tracking(task_id="T-501")
+
+  "Show time breakdown for T-501 with subtask status"
+    → get_time_tracking + get_subtasks
+
+Approval workflows:
+  "Is T-501 ready for release?"
+    → get_approvals + get_subtasks + get_checklists
+      (all approvals done? all subtasks done? all checklists checked?)
+
+  "Who still needs to approve T-501?"
+    → get_approvals(task_id="T-501")
 """
 import os
 import logging
-from mcp_server.shared.llm_helper import generate_answer
 from mcp_server.shared.webhook_helper import call_n8n_webhook
 
 logger = logging.getLogger("mcp_server.crm.tools")
-
-
-async def _call_n8n_crm(webhook_url: str, token: str, params: dict) -> str:
-    """Proxy to the shared async webhook helper for CRM-specific calls."""
-    return await call_n8n_webhook(webhook_url, token, params)
-
-
 
 
 # ── Tool registration ──────────────────────────────────────────────────────
@@ -29,168 +90,91 @@ def register_tools(mcp):
     """Register CRM query tools with the MCP server."""
 
     @mcp.tool()
-    async def get_tasks(access_token: str, deal_id: str) -> str:
-        """
-        Retrieve tasks linked to a specific deal.
-
-        Use when the user asks about tasks, to-do items, or action items for a deal.
-
-        Args:
-            access_token: API token for authenticating the CRM request.
-            deal_id: The deal ID to fetch tasks for (e.g. 'D-100').
-
-        Returns:
-            A formatted list of tasks.
-        """
-        url = os.getenv("N8N_WEBHOOK_CRM_GET_TASKS")
-        raw = await _call_n8n_crm(url, access_token, {"deal_id": deal_id})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "You are a project manager. List tasks with bullet points showing "
-            "ID, title, status, and assignee. If empty, say 'No tasks found.'",
-            raw, f"Get tasks for deal {deal_id}"
-        )
-
-    @mcp.tool()
     async def get_task_comments(access_token: str, task_id: str) -> str:
         """
-        Retrieve comments/discussion thread for a specific task.
+        Retrieve comments/discussion thread for a specific task. Returns raw JSON.
 
-        Use when the user asks about comments, notes, or discussion on a task.
+        Use when the user asks about comments, notes, discussion,
+        activity, or recent updates on a task.
 
         Args:
             access_token: API token for authenticating the CRM request.
             task_id: The task ID to fetch comments for (e.g. 'T-501').
 
         Returns:
-            A chronological summary of the comment thread.
+            Raw JSON array of comments with author, text, timestamp.
         """
-        url = os.getenv("N8N_WEBHOOK_CRM_GET_COMMENTS")
-        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "Summarize the comment thread chronologically. "
-            "If empty, say 'No comments on this task yet.'",
-            raw, f"Get comments for task {task_id}"
-        )
-
-    # ── Checklists ─────────────────────────────────────────────────────────
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_COMMENTS", "")
+        return await call_n8n_webhook(url, access_token, {"task_id": task_id})
 
     @mcp.tool()
     async def get_checklists(access_token: str, task_id: str) -> str:
         """
-        Retrieve checklists for a specific task.
+        Retrieve checklists for a specific task. Returns raw JSON.
 
         Use when the user asks about checklists, checkbox items,
-        or completion progress on a task.
+        completion progress, or remaining items on a task.
 
         Args:
             access_token: API token for authenticating the CRM request.
             task_id: The task ID to fetch checklists for (e.g. 'T-501').
 
         Returns:
-            A formatted list of checklist items with their completion status.
+            Raw JSON array of checklist items with name, completed status.
         """
-        url = os.getenv("N8N_WEBHOOK_CRM_GET_CHECKLISTS")
-        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "You are a project manager. List each checklist item with a checkbox "
-            "(✅ for done, ⬜ for pending). Show completion percentage at the top. "
-            "If empty, say 'No checklists found for this task.'",
-            raw, f"Get checklists for task {task_id}"
-        )
-
-    # ── Subtasks ───────────────────────────────────────────────────────────
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_CHECKLISTS", "")
+        return await call_n8n_webhook(url, access_token, {"task_id": task_id})
 
     @mcp.tool()
     async def get_subtasks(access_token: str, task_id: str) -> str:
         """
-        Retrieve subtasks (child tasks) for a specific task.
+        Retrieve subtasks (child tasks) for a specific task. Returns raw JSON.
 
-        Use when the user asks about subtasks, sub-items,
-        or breakdown of work within a task.
+        Use when the user asks about subtasks, sub-items, breakdown of work,
+        progress, or status of a task (subtask completion = progress).
 
         Args:
             access_token: API token for authenticating the CRM request.
             task_id: The parent task ID to fetch subtasks for.
 
         Returns:
-            A formatted list of subtasks with status and assignee.
+            Raw JSON array of subtasks with id, title, status, assignee.
         """
-        url = os.getenv("N8N_WEBHOOK_CRM_GET_SUBTASKS")
-        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "You are a project manager. List subtasks with bullet points showing "
-            "ID, title, status, and assignee. Show count of completed vs total. "
-            "If empty, say 'No subtasks found for this task.'",
-            raw, f"Get subtasks for task {task_id}"
-        )
-
-    # ── Approvals ──────────────────────────────────────────────────────────
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_SUBTASKS", "")
+        return await call_n8n_webhook(url, access_token, {"task_id": task_id})
 
     @mcp.tool()
     async def get_approvals(access_token: str, task_id: str) -> str:
         """
-        Retrieve approval requests and their statuses for a task.
+        Retrieve approval requests and statuses for a task. Returns raw JSON.
 
         Use when the user asks about approvals, sign-offs,
-        review status, or who approved/rejected something.
+        review status, who approved/rejected, or readiness for release.
 
         Args:
             access_token: API token for authenticating the CRM request.
             task_id: The task ID to fetch approvals for.
 
         Returns:
-            A summary of approval statuses per approver.
+            Raw JSON array of approvals with approver, status, date.
         """
-        url = os.getenv("N8N_WEBHOOK_CRM_GET_APPROVALS")
-        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "You are a compliance assistant. For each approval, show: "
-            "approver name, status (✅ Approved / ❌ Rejected / ⏳ Pending), "
-            "and date. If empty, say 'No approval requests found for this task.'",
-            raw, f"Get approvals for task {task_id}"
-        )
-
-    # ── Time Tracking ──────────────────────────────────────────────────────
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_APPROVALS", "")
+        return await call_n8n_webhook(url, access_token, {"task_id": task_id})
 
     @mcp.tool()
     async def get_time_tracking(access_token: str, task_id: str) -> str:
         """
-        Retrieve time tracking entries for a specific task.
+        Retrieve time tracking entries for a specific task. Returns raw JSON.
 
         Use when the user asks about time spent, hours logged,
-        time estimates, or time tracking data for a task.
+        time estimates, resource allocation, or team workload.
 
         Args:
             access_token: API token for authenticating the CRM request.
             task_id: The task ID to fetch time entries for.
 
         Returns:
-            A summary of time logged with totals.
+            Raw JSON array of time entries with person, hours, date, description.
         """
-        url = os.getenv("N8N_WEBHOOK_CRM_GET_TIME")
-        raw = await _call_n8n_crm(url, access_token, {"task_id": task_id})
-        if raw.startswith("Error:"):
-            return raw
-
-        return generate_answer(
-            "You are a project analyst. Summarize time tracking data: "
-            "list each entry with person, hours, date, and description. "
-            "Show total hours at the end. Format durations as Xh Ym. "
-            "If empty, say 'No time entries found for this task.'",
-            raw, f"Get time tracking for task {task_id}"
-        )
+        url = os.getenv("N8N_WEBHOOK_CRM_GET_TIME", "")
+        return await call_n8n_webhook(url, access_token, {"task_id": task_id})

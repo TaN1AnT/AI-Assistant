@@ -9,6 +9,7 @@ __pycache__/
 
 accesses.txt
 service_account.json
+service-account.json
 
 
 # Distribution / packaging

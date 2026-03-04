@@ -1,9 +1,13 @@
 """
-CRM MCP Server — Business data queries via n8n webhooks.
+CRM MCP Server — Raw data queries via n8n webhooks.
 
 Port: 8082
-Tools: get_tasks, get_task_comments, get_checklists,
-       get_subtasks, get_approvals, get_time_tracking
+Tools (all return raw JSON, no LLM formatting):
+  get_task_comments, get_checklists,
+  get_subtasks, get_approvals, get_time_tracking
+
+The supervisor LLM orchestrates multi-step data gathering
+and generates one comprehensive answer from all raw results.
 
 Run standalone: python -m mcp_server.crm.server
 """

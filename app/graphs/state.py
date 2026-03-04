@@ -20,6 +20,7 @@ class AgentState(TypedDict):
         user_role:    Role (admin, sales_rep, guest) for permission checks.
         permissions:  List of allowed tool names.
         access_token: API token from the user, forwarded to n8n webhooks.
+        request_id:   Unique request ID for end-to-end tracing.
     """
     messages: Annotated[List[BaseMessage], operator.add]
     user_id: str
@@ -27,6 +28,7 @@ class AgentState(TypedDict):
     user_role: str
     permissions: List[str]
     access_token: str
+    request_id: str
     # Internal loop-control fields (managed by supervisor graph)
-    _iteration: int    # Current loop count (max 10)
+    _iteration: int    # Current loop count (max 6)
     _validation: str   # "COMPLETE" or "INCOMPLETE"
