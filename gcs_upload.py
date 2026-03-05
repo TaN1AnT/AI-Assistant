@@ -11,7 +11,7 @@ SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 GCS_BUCKET_URL = os.getenv("GCS_BUCKET_URL")
 
 # 3. Local path to the file or folder you want to upload
-LOCAL_PATH = "D:\AI_Orchestration\documents"
+LOCAL_PATH = r"D:\AI_Orchestration\documents"
 
 
 def upload_to_gcs(json_key, bucket_url, local_path):
@@ -48,7 +48,7 @@ def upload_to_gcs(json_key, bucket_url, local_path):
                 local_file = os.path.join(root, file)
                 
                 # Create a relative path for GCS
-                rel_path = os.relpath(local_file, local_path)
+                rel_path = os.path.relpath(local_file, local_path)
                 blob_path = os.path.join(dest_prefix, rel_path).replace("\\", "/")
                 
                 blob = bucket.blob(blob_path)

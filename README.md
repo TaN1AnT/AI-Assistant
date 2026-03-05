@@ -27,7 +27,6 @@ Enterprise-grade AI agent system for CRM automation, document knowledge retrieva
 1.  **Clone the repository**:
     ```bash
     git clone <repo-url>
-    cd AI_Orchestration
     ```
 
 2.  **Create a Virtual Environment**:
@@ -73,37 +72,3 @@ uvicorn main:api --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-## 🧪 Testing the Setup
-
-### Health Check
-Check if all MCP servers are connected and the graph is ready:
-```bash
-curl http://localhost:8000/health
-```
-
-### Chat Request (Sync)
-```bash
-curl -X POST http://localhost:8000/v1/webhook/n8n \
-  -H "X-Webhook-Secret: your-secret-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "What subtasks are in T-501?",
-    "access_token": "your-user-token"
-  }'
-```
-
----
-
-## 🛡 Security
-
--   **API Security**: Protected via `X-Webhook-Secret` and `X-Auth-Token` headers.
--   **Rate Limiting**: Sliding window protection (60 requests/min/user).
--   **Input Sanitization**: Built-in protection against prompt injection attacks.
--   **Tool Isolation**: Each tool call runs in a safe sandbox; failure of 1 tool does not break the entire workflow.
-
----
-
-## 📄 Documentation
-
-For deep technical details on the request pipeline, tool inventory, and architecture diagrams, see:
-[System Documentation (docs/system_documentation.md)](docs/system_documentation.md)

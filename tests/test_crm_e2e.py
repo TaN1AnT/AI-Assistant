@@ -17,31 +17,24 @@ load_dotenv()
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("test_crm_e2e")
+logger = logging.getLogger("test_suppa_e2e")
 
 
-def _make_mock_httpx_response(data, status_code=200):
-    """Create a mock httpx.Response."""
-    resp = MagicMock()
-    resp.status_code = status_code
-    resp.headers = {"content-type": "application/json"}
-    resp.json.return_value = data
-    resp.text = json.dumps(data)
-    resp.raise_for_status = MagicMock()
-    return resp
-
-
-class TestCRME2E(unittest.IsolatedAsyncioTestCase):
+class TestSuppaE2E(unittest.IsolatedAsyncioTestCase):
     """
-    E2E test for CRM integration.
-    Simulates the full flow: query → supervisor → CRM tool → n8n → callback.
-    Uses get_subtasks (task-level tool) since deals were removed.
+    E2E test for Suppa CRM integration.
+    Simulates: query → supervisor → suppa_search_instances tool → callback.
+    The suppa tools are mocked as StructuredTools to test the full graph flow.
     """
 
     @patch("app.utils.ChatGoogleGenerativeAI")
-    async def test_crm_full_process_with_callback(self, mock_chat_class):
+    async def test_suppa_full_process_with_callback(self, mock_chat_class):
         """
-        Tests the full background process including the final callback to n8n.
+        Tests the full background process:
+        1. Supervisor calls suppa_search_instances
+        2. Tool returns mock data
+        3. Supervisor generates answer
+        4. Callback sent with result + metrics
         """
         from app.graphs.supervisor import build_agent_graph
         from main import _process_and_callback
@@ -56,78 +49,75 @@ class TestCRME2E(unittest.IsolatedAsyncioTestCase):
         mock_llm_instance.ainvoke = mock_ainvoke
         mock_llm_instance.bind_tools.return_value = mock_llm_instance
 
+        # Step 1: LLM calls suppa_search_instances
         resp_step1 = AIMessage(
-            content="Fetching subtasks...",
+            content="Searching for tasks...",
             tool_calls=[{
-                "name": "get_subtasks",
-                "args": {"access_token": "token_abc", "task_id": "T-501"},
-                "id": "call_subtasks_01"
+                "name": "suppa_search_instances",
+                "args": {
+                    "entity_id": "entity-uuid-tasks",
+                    "fields": ["name", "status", "responsible"],
+                    "limit": 10,
+                },
+                "id": "call_search_01"
             }]
         )
-        resp_step2 = AIMessage(content="Task T-501 has 3 subtasks. Here is the breakdown.")
+        # Step 2: LLM generates final answer from tool data
+        resp_step2 = AIMessage(content="Found 3 tasks. Here is the summary:\n- Design review (done)\n- Implementation (in progress)\n- QA testing (todo)")
+        # Step 3: Validator says COMPLETE
         resp_validator = AIMessage(content="COMPLETE")
 
         mock_ainvoke.side_effect = [resp_step1, resp_step2, resp_validator]
-        mock_llm_instance.invoke.return_value = AIMessage(content="Processed tool data.")
 
-        # --- 2. SETUP MOCK HTTPX ---
-        MOCK_SUBTASKS = [
-            {"id": "ST-1", "title": "Design review", "status": "done", "assignee": "dev@co.com"},
-            {"id": "ST-2", "title": "Implementation", "status": "in_progress", "assignee": "dev2@co.com"},
-            {"id": "ST-3", "title": "QA testing", "status": "todo", "assignee": "qa@co.com"},
-        ]
+        # --- 2. SETUP MOCK SUPPA TOOL ---
+        MOCK_SEARCH_RESULT = json.dumps({
+            "entity_id": "entity-uuid-tasks",
+            "count": 3,
+            "instances": [
+                {"id": "inst-1", "name": "Design review", "status": {"name": "done"}, "responsible": {"name": "dev@co.com"}},
+                {"id": "inst-2", "name": "Implementation", "status": {"name": "in_progress"}, "responsible": {"name": "dev2@co.com"}},
+                {"id": "inst-3", "name": "QA testing", "status": {"name": "todo"}, "responsible": {"name": "qa@co.com"}},
+            ]
+        })
 
-        posted_urls = []
+        async def mock_suppa_search(entity_id: str, fields: list, limit: int = 20, offset: int = 0, **kwargs) -> str:
+            """Mock suppa_search_instances that returns predefined data."""
+            return MOCK_SEARCH_RESULT
 
-        async def mock_httpx_post(url, **kwargs):
-            posted_urls.append(url)
-            if "crm" in url and "subtasks" in url:
-                return _make_mock_httpx_response(MOCK_SUBTASKS)
-            return _make_mock_httpx_response({"status": "ok"})
-
-        mock_webhook_client = MagicMock()
-        mock_webhook_client.post = AsyncMock(side_effect=mock_httpx_post)
-
-        # --- 3. SETUP REAL CRM TOOLS ---
-        from mcp_server.crm.tools import register_tools as register_crm_tools
-
-        class MockMCP:
-            def __init__(self):
-                self.tools = {}
-            def tool(self):
-                def decorator(func):
-                    self.tools[func.__name__] = func
-                    return func
-                return decorator
-
-        mock_mcp = MockMCP()
-        register_crm_tools(mock_mcp)
-
-        real_get_subtasks = mock_mcp.tools["get_subtasks"]
         mock_tools = [
             StructuredTool.from_function(
-                coroutine=real_get_subtasks,
-                name="get_subtasks",
-                description="Get subtasks for a task"
+                coroutine=mock_suppa_search,
+                name="suppa_search_instances",
+                description="Search records in a Suppa entity"
             ),
         ]
 
-        os.environ["N8N_WEBHOOK_CRM_GET_SUBTASKS"] = "https://n8n.modern-expo.com/webhook/crm/subtasks"
+        # Mock the webhook client for the callback
+        posted_callbacks = []
 
-        # Both CRM tools and callback now use the same shared httpx client
+        async def mock_callback_post(url, **kwargs):
+            posted_callbacks.append({"url": url, **kwargs})
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            return resp
+
+        mock_httpx_client = MagicMock()
+        mock_httpx_client.post = AsyncMock(side_effect=mock_callback_post)
+
         with patch.object(mcp_client, "get_tools", return_value=mock_tools), \
-             patch("mcp_server.shared.webhook_helper._client", mock_webhook_client):
+             patch("mcp_server.shared.webhook_helper._client", mock_httpx_client):
 
             agent_workflow = await build_agent_graph()
             graph = agent_workflow.compile()
 
-            # --- 4. EXECUTE FULL BACKGROUND FLOW ---
-            USER_QUERY = "What are the subtasks for task T-501?"
+            # --- 3. EXECUTE FULL BACKGROUND FLOW ---
+            USER_QUERY = "Show me all tasks"
             ACCESS_TOKEN = "token_abc"
             CALLBACK_URL = "https://n8n.internal/webhook/my-callback"
-            REQUEST_ID = "req-e2e-999"
+            REQUEST_ID = "req-suppa-001"
 
-            logger.info(f"Starting E2E Background processing for: {USER_QUERY}")
+            logger.info(f"Starting Suppa E2E for: {USER_QUERY}")
 
             await _process_and_callback(
                 graph=graph,
@@ -137,29 +127,24 @@ class TestCRME2E(unittest.IsolatedAsyncioTestCase):
                 request_id=REQUEST_ID
             )
 
-        # --- 5. VERIFY OUTCOMES ---
-        logger.info("Verifying final outcomes...")
-        logger.info(f"POSTed URLs: {posted_urls}")
+        # --- 4. VERIFY OUTCOMES ---
+        logger.info(f"Callbacks sent: {len(posted_callbacks)}")
 
-        self.assertTrue(any("crm" in u and "subtasks" in u for u in posted_urls), "Subtasks webhook should be called")
-        self.assertTrue(any(CALLBACK_URL in u for u in posted_urls), "Final callback should be sent")
+        # Verify callback was sent
+        self.assertTrue(len(posted_callbacks) > 0, "At least one callback should be sent")
 
-        callback_call = None
-        for call in mock_webhook_client.post.call_args_list:
-            args, kwargs = call
-            if CALLBACK_URL in args[0]:
-                callback_call = kwargs
-                break
+        callback = posted_callbacks[-1]
+        self.assertEqual(callback["url"], CALLBACK_URL)
 
-        self.assertIsNotNone(callback_call, "Callback should be sent via shared httpx client")
-        payload = callback_call.get("json", {})
+        payload = callback.get("json", {})
         self.assertEqual(payload.get("status"), "completed")
-        self.assertIn("get_subtasks", payload.get("tools_used", []))
-        # Verify new execution metrics are present
+        self.assertIn("suppa_search_instances", payload.get("tools_used", []))
+
+        # Verify execution metrics
         self.assertGreater(payload.get("execution_time_ms", 0), 0)
         self.assertGreater(payload.get("tools_called_count", 0), 0)
 
-        logger.info("Full CRM E2E process: PASSED")
+        logger.info("Suppa E2E process: PASSED")
 
 if __name__ == "__main__":
     unittest.main()

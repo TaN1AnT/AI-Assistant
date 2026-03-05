@@ -1,9 +1,9 @@
 """
-MCP Client — Dynamic 3-Server Connection Manager.
+MCP Client — 2-Server Connection Manager.
 
-Connects to Knowledge (:8081), CRM (:8082), and Automation (:8083)
-MCP servers. Discovers all tools at startup and builds a routing
-map so call_tool() sends requests to the correct server automatically.
+Connects to Knowledge (:8081/SSE) and Suppa CRM (suppa-mcp-server via stdio).
+Discovers all tools at startup and builds a routing map so call_tool()
+sends requests to the correct server automatically.
 
 Architecture:
   connect() → for each server → get_tools() → build _tool_route_map
@@ -31,10 +31,20 @@ class UnifiedMCPClient:
         self._tool_route_map: Dict[str, str] = {}  # {"tool_name": "server_name"}
 
         # Server config from environment
+        suppa_env = {
+            **os.environ,
+            "SUPPA_API_KEY": os.getenv("SUPPA_API_KEY", ""),
+            "SUPPA_API_URL": os.getenv("SUPPA_API_URL", "https://sp.modern-expo.com"),
+        }
+
         self.servers = {
             "knowledge":  {"transport": "sse", "url": os.getenv("MCP_KNOWLEDGE_URL",  "http://127.0.0.1:8081/sse")},
-            "crm":        {"transport": "sse", "url": os.getenv("MCP_CRM_URL",        "http://127.0.0.1:8082/sse")},
-            "automation": {"transport": "sse", "url": os.getenv("MCP_AUTOMATION_URL", "http://127.0.0.1:8083/sse")},
+            "crm":        {
+                "transport": "stdio",
+                "command": "node",
+                "args": [os.path.join(os.path.dirname(os.path.dirname(__file__)), "suppa-mcp-server", "dist", "index.js")],
+                "env": suppa_env,
+            },
         }
 
     @property

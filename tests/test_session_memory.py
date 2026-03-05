@@ -80,28 +80,20 @@ def _make_httpx_mocks(task_data=None):
 
 
 async def _build_test_graph(mcp_client):
-    """Build a test graph with real CRM tools."""
+    """Build a test graph with a mock Suppa tool."""
     from app.graphs.supervisor import build_agent_graph
     from langchain_core.tools import StructuredTool
-    from mcp_server.crm.tools import register_tools as register_crm_tools
 
-    class MockMCP:
-        def __init__(self):
-            self.tools = {}
-        def tool(self):
-            def decorator(func):
-                self.tools[func.__name__] = func
-                return func
-            return decorator
-
-    mock_mcp = MockMCP()
-    register_crm_tools(mock_mcp)
+    async def mock_suppa_search(entity_id: str, fields: list, limit: int = 20, **kwargs) -> str:
+        """Mock suppa_search_instances for testing."""
+        import json
+        return json.dumps({"entity_id": entity_id, "count": 0, "instances": []})
 
     mock_tools = [
         StructuredTool.from_function(
-            coroutine=mock_mcp.tools["get_subtasks"],
-            name="get_subtasks",
-            description="Get subtasks for a task"
+            coroutine=mock_suppa_search,
+            name="suppa_search_instances",
+            description="Search records in a Suppa entity"
         ),
     ]
 

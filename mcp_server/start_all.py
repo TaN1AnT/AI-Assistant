@@ -1,12 +1,14 @@
 """
-3-Server Launcher — Starts Knowledge, CRM, and Automation MCP servers.
+2-Server Launcher — Starts Knowledge and Automation MCP servers.
 
 Usage:  python -m mcp_server.start_all
 
 Starts:
   Knowledge  → Port 8081 (rag_search)
-  CRM        → Port 8082 (get_tasks, get_task_comments, etc.)
   Automation → Port 8083 (create_task, send_notification)
+
+CRM is handled by suppa-mcp-server (Node.js) via stdio transport,
+managed by the MCP client — NOT launched here.
 
 Loads .env and passes all env vars to child processes so they
 have access to GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_PROJECT_ID, etc.
@@ -27,15 +29,13 @@ logger = logging.getLogger("mcp_server.launcher")
 
 SERVERS = [
     {"name": "Knowledge",  "module": "mcp_server.knowledge.server",  "port": 8081},
-    {"name": "CRM",        "module": "mcp_server.crm.server",        "port": 8082},
-    {"name": "Automation", "module": "mcp_server.automation.server", "port": 8083},
 ]
 
 
 def main():
     processes = []
     logger.info("=" * 60)
-    logger.info("  Starting 3-Server MCP Cluster")
+    logger.info("  Starting 2-Server MCP Cluster (CRM via suppa-mcp-server stdio)")
     logger.info("=" * 60)
 
     # Pass current env (with .env loaded) to child processes

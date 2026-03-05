@@ -154,7 +154,8 @@ class ChatResponse(BaseModel):
 
 class N8NWebhookRequest(BaseModel):
     """Incoming request from n8n webhook."""
-    message: str                              # User's chat message
+    message: str = ""                              # User's chat message
+    query: str = ""                                # Alternative field name for n8n
     session_id: str = ""                      # n8n session ID for conversation tracking
     access_token: str = ""                    # CRM API token (if needed)
     callback_url: str = ""                    # n8n $execution.resumeUrl
@@ -373,12 +374,10 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
     thread_id = session_id or f"n8n_{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Load conversation history from session (if any)
-    history = session_store.load_history(session_id)
-    messages = history + [HumanMessage(content=query)]
-
+    # Use LangGraph's checkpointer for history — no need to manually prepend messages
+    # unless we want to clear the session or inject system context.
     initial_state = {
-        "messages": messages,
+        "messages": [HumanMessage(content=query)],
         "user_id": "n8n-webhook",
         "user_email": "n8n@system",
         "user_role": "admin",
@@ -444,10 +443,14 @@ async def n8n_webhook_sync(
         raise HTTPException(status_code=503, detail="Agent not ready")
 
     request_id = uuid.uuid4().hex[:8]
-    logger.info(f"[{request_id}] n8n SYNC: '{req.message[:80]}'")
+    query_text = req.query or req.message
+    if not query_text:
+        raise HTTPException(status_code=400, detail="Either 'message' or 'query' field is required")
+
+    logger.info(f"[{request_id}] n8n SYNC: '{query_text[:80]}'")
 
     try:
-        response = await _run_ai_query(graph, req.message, req.access_token, request_id, req.session_id)
+        response = await _run_ai_query(graph, query_text, req.access_token, request_id, req.session_id)
         return response
     except Exception as e:
         logger.error(f"[{request_id}] n8n webhook error: {e}", exc_info=True)
@@ -490,12 +493,16 @@ async def n8n_webhook_async(
         raise HTTPException(status_code=503, detail="Agent not ready")
 
     request_id = uuid.uuid4().hex[:8]
-    logger.info(f"[{request_id}] n8n ASYNC: '{req.message[:80]}' → callback: {req.callback_url}")
+    query_text = req.query or req.message
+    if not query_text:
+        raise HTTPException(status_code=400, detail="Either 'message' or 'query' field is required")
+
+    logger.info(f"[{request_id}] n8n ASYNC: '{query_text[:80]}' → callback: {req.callback_url}")
 
     # Schedule background processing
     background_tasks.add_task(
         _process_and_callback,
-        graph, req.message, req.access_token, req.callback_url, request_id, req.session_id,
+        graph, query_text, req.access_token, req.callback_url, request_id, req.session_id,
     )
 
     return {

@@ -30,54 +30,52 @@ MAX_ITERATIONS = 6
 
 # ── System Prompt ──────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT_TEMPLATE = """You are an Enterprise AI Assistant. Gather raw data via tools, then synthesize one clear answer.
+SYSTEM_PROMPT_TEMPLATE = """You are an Enterprise AI Assistant connected to the Suppa platform and a knowledge base.
 
-TOOLS (CRM tools return raw JSON — interpret it, never show raw JSON):
-- rag_search(query) — search internal docs
-- get_task_comments(access_token, task_id) — comments on a task
-- get_checklists(access_token, task_id) — checklist items
-- get_subtasks(access_token, task_id) — child tasks
-- get_approvals(access_token, task_id) — approval statuses
-- get_time_tracking(access_token, task_id) — time entries
-- create_task(access_token, title, description) — create task
-- send_notification(access_token, recipient, message, channel) — notify
+TOOLS:
+- rag_search(query) — search internal docs/policies
+- suppa_list_entities(query?) — discover available entities (tables)
+- suppa_get_entity_props(entity_id) — get field names, types, comparators for an entity
+- suppa_search_instances(entity_id, fields, filter?, order?, limit?, offset?) — search records
+- suppa_get_instance(entity_id, instance_id, fields?) — get single record
+- suppa_get_child_instances(entity_id, instance_id) — get sub-records (subtasks)
+- suppa_get_comments(entity_id, instance_id) — get comments/discussion
+- suppa_get_mentions() — get unread @mentions
+- suppa_get_custom_enum_values(entity_id, prop_name) — get dropdown options
+- suppa_create_instance(entity_id, data) — create record
+- suppa_update_instance(entity_id, instance_id, data) — update record
+- suppa_create_comment(entity_id, instance_id, text) — add comment
 
 RULES:
-1. access_token for all CRM/Automation calls: `{access_token}`
-2. Call multiple tools in parallel when possible.
-3. For summaries/reports: call ALL relevant tools at once.
-4. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
-5. Never expose tokens or URLs.
+1. ALWAYS discover first: suppa_list_entities → suppa_get_entity_props → then read/write.
+2. Never guess field names or enum values — call suppa_get_entity_props first.
+3. RELATIONS: To fetch linked data (e.g. assignee name), use nested objects in `fields`: `{"responsible": {"id": {}, "name": {}}, "status": {"name": {}}}`.
+4. TIMESTAMPS: Suppa uses Unix timestamps in MILLISECONDS.
+5. Call multiple tools in parallel when possible.
+6. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
+7. Never expose tokens or URLs.
 
-DECOMPOSITION TEMPLATE:
-- Simple (1 data point): call 1 tool → answer.
-- Status/progress: get_subtasks + get_checklists (parallel).
-- Blocked/ready check: get_subtasks + get_approvals + get_checklists (parallel).
-- Full summary/report: get_subtasks + get_checklists + get_task_comments + get_approvals + get_time_tracking (all parallel).
-- Multiple tasks: call the same tool for each task_id in parallel."""
+WORKFLOW:
+1. User asks a question → identify which entity (table) is involved.
+2. suppa_list_entities(query="task") → get entity_id.
+3. suppa_get_entity_props(entity_id) → learn field names and types.
+4. Read data with correct fields: suppa_search_instances / suppa_get_instance / suppa_get_child_instances / suppa_get_comments.
+5. Synthesize ONE clear, structured answer from all gathered data."""
 
 
 # ── Validation Prompt ──────────────────────────────────────────────────────
 
-VALIDATION_PROMPT = """Review the conversation above. The user's original question is in the first HumanMessage.
+VALIDATION_PROMPT = """Review the conversation. The user's question is in the first HumanMessage.
 
-You have gathered raw data via tool calls. Evaluate completeness:
+Evaluate if the gathered data fully answers the question:
+- If the user asked about records but entity discovery (suppa_list_entities → suppa_get_entity_props) was skipped, say INCOMPLETE.
+- If the user asked about comments but suppa_get_comments was not called, say INCOMPLETE.
+- If the user asked about sub-records/subtasks but suppa_get_child_instances was not called, say INCOMPLETE.
+- If data was fetched and answers the question, say COMPLETE.
 
-1. Does the collected data FULLY answer the user's question?
-2. Is there MISSING information that requires additional tool calls?
-
-Common patterns that indicate INCOMPLETENESS:
-- User asked for a "summary" or "overview" of a task but only 1-2 data types were fetched.
-  A proper task summary needs at minimum: subtasks + checklists + comments + approvals.
-- User asked about "status" or "progress" but subtasks or checklists were not fetched.
-- User mentioned time/hours but get_time_tracking was not called.
-- User asked about approvals/sign-offs but get_approvals was not called.
-- User asked about multiple tasks but data for some tasks was not fetched.
-- User asked "is task ready?" but approvals + subtasks + checklists were not all checked.
-
-Respond with EXACTLY one of:
-- "COMPLETE" — if all necessary information has been gathered.
-- "INCOMPLETE: <reason>" — if more tool calls are needed. List the SPECIFIC tools to call.
+Respond with EXACTLY:
+- "COMPLETE" — if sufficient data was gathered.
+- "INCOMPLETE: [reason + specific tools to call]" — if critical data is missing.
 
 Do NOT generate a final answer. Only evaluate completeness."""
 
@@ -113,15 +111,13 @@ async def build_agent_graph():
     async def supervisor_node(state: AgentState):
         """
         The agent brain. Uses LLM to decide which tool(s) to call next.
-        Injects the access_token into the system prompt.
         Tracks iteration count to prevent infinite loops.
         """
         messages = state["messages"]
-        token = state.get("access_token", "NOT_PROVIDED")
         req_id = state.get("request_id", "")
         iteration = state.get("_iteration", 0) + 1
 
-        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(access_token=token)
+        system_prompt = SYSTEM_PROMPT_TEMPLATE
 
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=system_prompt)] + messages
