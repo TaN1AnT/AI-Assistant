@@ -32,34 +32,48 @@ MAX_ITERATIONS = 6
 
 SYSTEM_PROMPT_TEMPLATE = """You are an Enterprise AI Assistant connected to the Suppa platform and a knowledge base.
 
-TOOLS:
-- rag_search(query) — search internal docs/policies
-- suppa_list_entities(query?) — discover available entities (tables)
+You can answer questions in TWO ways:
+
+## 1. DIRECT ANSWER (no tools needed)
+For simple questions, greetings, general knowledge, or conversational messages:
+- "Hello" / "Hi" → Respond warmly, introduce yourself and your capabilities.
+- "What can you do?" → List your capabilities (knowledge search, task management, etc.).
+- General questions (math, definitions, advice) → Answer directly from your knowledge.
+- Follow-up questions that can be answered from the conversation context → Answer directly.
+Do NOT call any tools for these — just respond naturally.
+
+## 2. TOOL-ASSISTED ANSWER (when tools are needed)
+For questions about company data, documents, tasks, records, or CRM information.
+
+Available TOOLS:
+- rag_search(query) — search internal company docs, policies, product specs
+- suppa_list_entities(query?) — discover available entities (tables) in Suppa
 - suppa_get_entity_props(entity_id) — get field names, types, comparators for an entity
 - suppa_search_instances(entity_id, fields, filter?, order?, limit?, offset?) — search records
-- suppa_get_instance(entity_id, instance_id, fields?) — get single record
+- suppa_get_instance(entity_id, instance_id, fields?) — get a single record
 - suppa_get_child_instances(entity_id, instance_id) — get sub-records (subtasks)
-- suppa_get_comments(entity_id, instance_id) — get comments/discussion
-- suppa_get_mentions() — get unread @mentions
-- suppa_get_custom_enum_values(entity_id, prop_name) — get dropdown options
-- suppa_create_instance(entity_id, data) — create record
-- suppa_update_instance(entity_id, instance_id, data) — update record
-- suppa_create_comment(entity_id, instance_id, text) — add comment
+- suppa_get_comments(entity_id, instance_id) — get comments/discussion thread
+- suppa_get_mentions() — get unread @mentions for the user
+- suppa_get_custom_enum_values(entity_id, prop_name) — get dropdown/enum options
+- suppa_create_instance(entity_id, data) — create a new record
+- suppa_update_instance(entity_id, instance_id, data) — update an existing record
+- suppa_create_comment(entity_id, instance_id, text) — add a comment to a record
 
-RULES:
-1. ALWAYS discover first: suppa_list_entities → suppa_get_entity_props → then read/write.
-2. Never guess field names or enum values — call suppa_get_entity_props first.
-3. RELATIONS: To fetch linked data (e.g. assignee name), use nested objects in `fields`: `{"responsible": {"id": {}, "name": {}}, "status": {"name": {}}}`.
-4. TIMESTAMPS: Suppa uses Unix timestamps in MILLISECONDS.
-5. Call multiple tools in parallel when possible.
-6. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
-7. Never expose tokens or URLs.
+TOOL RULES:
+1. For company docs/policies/products → use rag_search.
+2. For Suppa data (tasks, deals, projects) → ALWAYS discover first: suppa_list_entities → suppa_get_entity_props → then read/write.
+3. Never guess field names or enum values — call suppa_get_entity_props first.
+4. RELATIONS: To fetch linked data (e.g. assignee name), use nested objects in `fields`: `{"responsible": {"id": {}, "name": {}}, "status": {"name": {}}}`.
+5. TIMESTAMPS: Suppa uses Unix timestamps in MILLISECONDS.
+6. Call multiple tools in parallel when possible.
+7. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
+8. Never expose tokens or URLs.
 
-WORKFLOW:
-1. User asks a question → identify which entity (table) is involved.
+SUPPA WORKFLOW:
+1. User asks about records → identify which entity (table) is involved.
 2. suppa_list_entities(query="task") → get entity_id.
 3. suppa_get_entity_props(entity_id) → learn field names and types.
-4. Read data with correct fields: suppa_search_instances / suppa_get_instance / suppa_get_child_instances / suppa_get_comments.
+4. Read data: suppa_search_instances / suppa_get_instance / suppa_get_child_instances / suppa_get_comments.
 5. Synthesize ONE clear, structured answer from all gathered data."""
 
 
@@ -67,14 +81,18 @@ WORKFLOW:
 
 VALIDATION_PROMPT = """Review the conversation. The user's question is in the first HumanMessage.
 
-Evaluate if the gathered data fully answers the question:
-- If the user asked about records but entity discovery (suppa_list_entities → suppa_get_entity_props) was skipped, say INCOMPLETE.
-- If the user asked about comments but suppa_get_comments was not called, say INCOMPLETE.
-- If the user asked about sub-records/subtasks but suppa_get_child_instances was not called, say INCOMPLETE.
-- If data was fetched and answers the question, say COMPLETE.
+Evaluate if the AI's response fully answers the user's question:
+
+- If the question is a simple greeting, general knowledge, or conversational message — say COMPLETE (no tools needed).
+- If the AI already answered the question directly without tools and the answer is reasonable — say COMPLETE.
+- If the user asked about company docs/policies but rag_search was not called — say INCOMPLETE.
+- If the user asked about Suppa records but entity discovery (suppa_list_entities → suppa_get_entity_props) was skipped — say INCOMPLETE.
+- If the user asked about comments but suppa_get_comments was not called — say INCOMPLETE.
+- If the user asked about sub-records/subtasks but suppa_get_child_instances was not called — say INCOMPLETE.
+- If data was fetched and answers the question — say COMPLETE.
 
 Respond with EXACTLY:
-- "COMPLETE" — if sufficient data was gathered.
+- "COMPLETE" — if the answer is sufficient.
 - "INCOMPLETE: [reason + specific tools to call]" — if critical data is missing.
 
 Do NOT generate a final answer. Only evaluate completeness."""
@@ -103,6 +121,31 @@ async def build_agent_graph():
     llm_with_tools = llm.bind_tools(tools) if tools else llm
     llm_validator = get_gemini_llm(temperature=0)  # Separate instance, no tools bound
 
+    # ── Helper: sanitize messages for Vertex AI ─────────────────────
+    def _sanitize_messages(msgs):
+        """
+        Vertex AI rejects messages with empty 'content' (400: must include parts).
+        AIMessages with tool_calls often have content="". This adds a placeholder.
+        Also filters out any completely empty messages.
+        """
+        clean = []
+        for m in msgs:
+            if isinstance(m, AIMessage):
+                if not m.content and m.tool_calls:
+                    m = AIMessage(content="(calling tools)", tool_calls=m.tool_calls,
+                                  additional_kwargs=m.additional_kwargs,
+                                  response_metadata=getattr(m, 'response_metadata', {}),
+                                  id=m.id)
+                elif not m.content and not m.tool_calls:
+                    continue  # skip entirely empty AI messages
+            elif isinstance(m, ToolMessage):
+                if not m.content:
+                    m = ToolMessage(content="(empty result)", tool_call_id=m.tool_call_id)
+            elif not getattr(m, 'content', None):
+                continue  # skip any message without content
+            clean.append(m)
+        return clean
+
     # ── Node: Supervisor ───────────────────────────────────────────────
 
     # ── Build tool lookup for safe_tool_node ─────────────────────────
@@ -121,6 +164,9 @@ async def build_agent_graph():
 
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=system_prompt)] + messages
+
+        # Sanitize messages to prevent Vertex AI 400 errors
+        messages = _sanitize_messages(messages)
 
         # Add a cooling sleep to mitigate rate-limiting if we are deep in the loop
         if iteration > 2:
@@ -192,7 +238,7 @@ async def build_agent_graph():
             return {"_validation": "COMPLETE"}
 
         # Build a validation request: full conversation + validation prompt
-        validation_messages = list(messages) + [
+        validation_messages = _sanitize_messages(list(messages)) + [
             HumanMessage(content=VALIDATION_PROMPT)
         ]
 
