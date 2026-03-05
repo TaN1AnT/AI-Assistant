@@ -108,7 +108,7 @@ async def _build_test_graph(mcp_client):
 
 class TestSessionContinuity(unittest.IsolatedAsyncioTestCase):
 
-    @patch("app.utils.ChatGoogleGenerativeAI")
+    @patch("app.utils.ChatVertexAI")
     async def test_follow_up_retains_context(self, mock_chat_class):
         from main import _process_and_callback
         from app.mcp_client import mcp_client
@@ -178,7 +178,7 @@ class TestSessionContinuity(unittest.IsolatedAsyncioTestCase):
 
 class TestMultiSessionIsolation(unittest.IsolatedAsyncioTestCase):
 
-    @patch("app.utils.ChatGoogleGenerativeAI")
+    @patch("app.utils.ChatVertexAI")
     async def test_two_sessions_are_independent(self, mock_chat_class):
         from main import _process_and_callback
         from app.mcp_client import mcp_client

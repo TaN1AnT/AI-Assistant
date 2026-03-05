@@ -27,7 +27,7 @@ class TestSuppaE2E(unittest.IsolatedAsyncioTestCase):
     The suppa tools are mocked as StructuredTools to test the full graph flow.
     """
 
-    @patch("app.utils.ChatGoogleGenerativeAI")
+    @patch("app.utils.ChatVertexAI")
     async def test_suppa_full_process_with_callback(self, mock_chat_class):
         """
         Tests the full background process:

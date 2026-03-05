@@ -28,7 +28,7 @@ class TestChatSessionE2E(unittest.IsolatedAsyncioTestCase):
     3. Suppa Routing: Does it call the Suppa MCP for task management?
     """
 
-    @patch("app.utils.ChatGoogleGenerativeAI")
+    @patch("app.utils.ChatVertexAI")
     async def test_multi_turn_session_flow(self, mock_chat_class):
         from app.graphs.supervisor import build_agent_graph
         from main import app_state

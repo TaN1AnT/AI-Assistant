@@ -29,7 +29,7 @@ class TestEnterpriseFullFlow(unittest.IsolatedAsyncioTestCase):
     4. Error Handling (partial failure in parallel calls)
     """
 
-    @patch("app.utils.ChatGoogleGenerativeAI")
+    @patch("app.utils.ChatVertexAI")
     async def test_full_enterprise_scenario(self, mock_chat_class):
         from app.graphs.supervisor import build_agent_graph
         from app.mcp_client import mcp_client

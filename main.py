@@ -374,10 +374,12 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
     thread_id = session_id or f"n8n_{uuid.uuid4().hex[:8]}"
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Use LangGraph's checkpointer for history — no need to manually prepend messages
-    # unless we want to clear the session or inject system context.
+    # Load conversation history from session store (cross-request memory)
+    history = session_store.load_history(session_id)
+    messages = history + [HumanMessage(content=query)]
+
     initial_state = {
-        "messages": [HumanMessage(content=query)],
+        "messages": messages,
         "user_id": "n8n-webhook",
         "user_email": "n8n@system",
         "user_role": "admin",
