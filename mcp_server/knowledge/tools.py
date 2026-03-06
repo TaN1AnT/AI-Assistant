@@ -16,13 +16,15 @@ from mcp_server.shared.llm_helper import generate_answer
 logger = logging.getLogger("mcp_server.knowledge.tools")
 
 RAG_SYSTEM_PROMPT = (
-    "Ти — корпоративний помічник знань, заснований на документації компанії.\n\n"
-    "ПРАВИЛА:\n"
-    "1. Відповідай ТІЛЬКИ на основі наданого контексту.\n"
-    "2. Якщо відповіді немає в контексті, чітко скажи про це.\n"
-    "3. Завжди цитуй джерело: [Джерело: назва_документа]\n"
-    "4. Давай детальні, структуровані відповіді. Використовуй маркований список для переліку характеристик та пунктів.\n"
-    "5. Відповідай мовою запиту (якщо запит українською — відповідай українською)."
+    "You are a corporate knowledge assistant based on company documentation.\n\n"
+    "RULES:\n"
+    "1. Answer ONLY based on the provided context.\n"
+    "2. If the answer is not in the context, clearly state that.\n"
+    "3. ALWAYS cite the source at the end of every sentence or paragraph where it is used, in the format: [Source: document_name (URL_if_available)]\n"
+    "4. At the end of the response, always add a list of all sources used under the header 'Sources:'.\n"
+    "5. For each source in the list, provide its name and the URL if provided.\n"
+    "6. Provide detailed, structured answers. Use bullet points for lists and features.\n"
+    "7. Answer in the same language as the user's query (if query is Ukrainian — answer Ukrainian, etc.)."
 )
 
 
@@ -60,6 +62,44 @@ def _ensure_vertexai():
     logger.info("Knowledge: Vertex AI initialized")
 
 
+def _generate_signed_url(gcs_uri: str) -> str:
+    """
+    Generates a signed URL for a GCS object.
+    gcs_uri format: gs://bucket/path/to/object
+    """
+    if not gcs_uri.startswith("gs://"):
+        return gcs_uri
+
+    try:
+        from google.cloud import storage
+        import datetime
+
+        # Extract bucket and blob names
+        path = gcs_uri.replace("gs://", "")
+        bucket_name = path.split("/")[0]
+        blob_name = "/".join(path.split("/")[1:])
+
+        # Use the same credentials as Vertex AI
+        creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if creds_path and os.path.isfile(creds_path):
+            client = storage.Client.from_service_account_json(creds_path)
+        else:
+            client = storage.Client()
+
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=datetime.timedelta(hours=1),
+            method="GET",
+        )
+        return url
+    except Exception as e:
+        logger.warning(f"Failed to generate signed URL for {gcs_uri}: {e}")
+        return gcs_uri
+
+
 def _rag_retrieve(query: str) -> str:
     """
     Queries the Vertex AI RAG corpus and returns formatted context.
@@ -95,11 +135,19 @@ def _rag_retrieve(query: str) -> str:
 
         # Format contexts for the LLM
         parts = []
+        source_urls = {} # Cache for signed URLs to avoid redundant calls
+
         for chunk in contexts:
-            if chunk["source"]:
-                parts.append(f"[Джерело: {chunk['source']}]\n{chunk['text']}")
+            source = chunk["source"]
+            if source and source not in source_urls:
+                source_urls[source] = _generate_signed_url(source)
+
+            display_source = source_urls.get(source, source) if source else ""
+            
+            if source:
+                parts.append(f"[Джерело: {source} ({display_source})]\n{chunk['text']}")
             else:
-                parts.append(chunk["text"])
+                parts.append(chunk['text'])
 
         return "\n\n---\n\n".join(parts)
 

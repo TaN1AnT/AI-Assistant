@@ -25,6 +25,7 @@ from app.mcp_client import mcp_client
 from app.graphs.state import AgentState
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 MAX_ITERATIONS = 6
 
@@ -32,18 +33,12 @@ MAX_ITERATIONS = 6
 
 SYSTEM_PROMPT_TEMPLATE = """You are an Enterprise AI Assistant connected to the Suppa platform and a knowledge base.
 
-You can answer questions in TWO ways:
+IMPORTANT RULE: You MUST use tools for every question. The only exception is simple greetings ("hello", "hi", "thanks", "goodbye") — respond to those directly.
 
-## 1. DIRECT ANSWER (no tools needed)
-For simple questions, greetings, general knowledge, or conversational messages:
-- "Hello" / "Hi" → Respond warmly, introduce yourself and your capabilities.
-- "What can you do?" → List your capabilities (knowledge search, task management, etc.).
-- General questions (math, definitions, advice) → Answer directly from your knowledge.
-- Follow-up questions that can be answered from the conversation context → Answer directly.
-Do NOT call any tools for these — just respond naturally.
-
-## 2. TOOL-ASSISTED ANSWER (when tools are needed)
-For questions about company data, documents, tasks, records, or CRM information.
+For ALL other questions — even general ones — use the appropriate tool:
+- Company docs, policies, products, guides → use rag_search(query)
+- Tasks, deals, projects, records, users, CRM data → use Suppa tools (see workflow below)
+- If unsure which tool to use → try rag_search first, then Suppa if no results
 
 Available TOOLS:
 - rag_search(query) — search internal company docs, policies, product specs
@@ -69,27 +64,31 @@ TOOL RULES:
 7. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
 8. Never expose tokens or URLs.
 
-SUPPA WORKFLOW:
+SUPPA WORKFLOW (follow this order):
 1. User asks about records → identify which entity (table) is involved.
 2. suppa_list_entities(query="task") → get entity_id.
 3. suppa_get_entity_props(entity_id) → learn field names and types.
 4. Read data: suppa_search_instances / suppa_get_instance / suppa_get_child_instances / suppa_get_comments.
-5. Synthesize ONE clear, structured answer from all gathered data."""
+5. Synthesize ONE clear, structured answer from all gathered data.
+
+IMPORTANT: When using 'rag_search', you MUST follow these citation rules:
+1. Every claim from a document must end with a citation: [Source: Document Name (URL)].
+2. You MUST use the exact URLs provided in the tool's 'Signed URL' field. These are clickable links.
+3. At the very end of your response, you MUST provide a dedicated section with the header 'Sources:' followed by a list of all used sources with their full URLs.
+4. DO NOT translate the word 'Sources' or 'Source' into other languages. Always use English for these tags to ensure correct system parsing."""
 
 
 # ── Validation Prompt ──────────────────────────────────────────────────────
 
 VALIDATION_PROMPT = """Review the conversation. The user's question is in the first HumanMessage.
 
-Evaluate if the AI's response fully answers the user's question:
-
-- If the question is a simple greeting, general knowledge, or conversational message — say COMPLETE (no tools needed).
-- If the AI already answered the question directly without tools and the answer is reasonable — say COMPLETE.
-- If the user asked about company docs/policies but rag_search was not called — say INCOMPLETE.
-- If the user asked about Suppa records but entity discovery (suppa_list_entities → suppa_get_entity_props) was skipped — say INCOMPLETE.
-- If the user asked about comments but suppa_get_comments was not called — say INCOMPLETE.
-- If the user asked about sub-records/subtasks but suppa_get_child_instances was not called — say INCOMPLETE.
-- If data was fetched and answers the question — say COMPLETE.
+Rules:
+- If the message is ONLY a greeting (hello, hi, hey, thanks, bye) → say COMPLETE.
+- For ALL other questions: at least one tool MUST have been called. If no tools were called, say INCOMPLETE.
+- If the user asked about company docs/policies but rag_search was not called → say INCOMPLETE.
+- If the user asked about Suppa records but entity discovery (suppa_list_entities → suppa_get_entity_props) was skipped → say INCOMPLETE.
+- If the user asked about comments but suppa_get_comments was not called → say INCOMPLETE.
+- If data was fetched and answers the question → say COMPLETE.
 
 Respond with EXACTLY:
 - "COMPLETE" — if the answer is sufficient.
@@ -125,24 +124,26 @@ async def build_agent_graph():
     def _sanitize_messages(msgs):
         """
         Vertex AI rejects messages with empty 'content' (400: must include parts).
-        AIMessages with tool_calls often have content="". This adds a placeholder.
-        Also filters out any completely empty messages.
+        This ensures every message has some text content.
         """
         clean = []
         for m in msgs:
-            if isinstance(m, AIMessage):
-                if not m.content and m.tool_calls:
-                    m = AIMessage(content="(calling tools)", tool_calls=m.tool_calls,
-                                  additional_kwargs=m.additional_kwargs,
-                                  response_metadata=getattr(m, 'response_metadata', {}),
-                                  id=m.id)
-                elif not m.content and not m.tool_calls:
-                    continue  # skip entirely empty AI messages
-            elif isinstance(m, ToolMessage):
-                if not m.content:
-                    m = ToolMessage(content="(empty result)", tool_call_id=m.tool_call_id)
-            elif not getattr(m, 'content', None):
-                continue  # skip any message without content
+            content = getattr(m, 'content', "")
+            if not content:
+                if isinstance(m, AIMessage) and getattr(m, 'tool_calls', None):
+                    # AI message with tool calls often has empty content
+                    m = AIMessage(content="(calling tools)", tool_calls=m.tool_calls, id=m.id)
+                elif isinstance(m, ToolMessage):
+                    # Tool response might be empty
+                    m = ToolMessage(content="(tool result)", tool_call_id=m.tool_call_id)
+                elif isinstance(m, SystemMessage):
+                    m = SystemMessage(content="(system prompt)")
+                elif isinstance(m, HumanMessage):
+                    m = HumanMessage(content="(empty message)")
+                else:
+                    # Fallback for any other message types
+                    if hasattr(m, 'content'):
+                        m.content = "(no content)"
             clean.append(m)
         return clean
 
@@ -166,13 +167,20 @@ async def build_agent_graph():
             messages = [SystemMessage(content=system_prompt)] + messages
 
         # Sanitize messages to prevent Vertex AI 400 errors
+        logger.info(f"[{req_id}] Supervisor (iter {iteration}): sanitizing {len(messages)} messages")
         messages = _sanitize_messages(messages)
 
         # Add a cooling sleep to mitigate rate-limiting if we are deep in the loop
         if iteration > 2:
+            logger.info(f"[{req_id}] Supervisor (iter {iteration}): cooling sleep...")
             await asyncio.sleep(1)
 
+        logger.info(f"[{req_id}] Supervisor (iter {iteration}): invoking LLM with {len(messages)} messages...")
+        for i, m in enumerate(messages):
+            logger.debug(f"[{req_id}] Message {i} ({type(m).__name__}): {str(m.content)[:100]}...")
+
         response = await llm_with_tools.ainvoke(messages)
+        logger.info(f"[{req_id}] Supervisor (iter {iteration}): LLM responded")
 
         if response.tool_calls:
             tool_names = [tc["name"] for tc in response.tool_calls]
@@ -229,23 +237,26 @@ async def build_agent_graph():
         to call more tools. The graph then loops back to supervisor.
         """
         messages = state["messages"]
+        req_id = state.get("request_id", "")
         iteration = state.get("_iteration", 0)
         last_reason = state.get("_validation", "")
 
         # Skip validation if we've hit the iteration limit
         if iteration >= MAX_ITERATIONS:
-            logger.warning(f"Max iterations ({MAX_ITERATIONS}) reached — forcing completion")
+            logger.warning(f"[{req_id}] Max iterations ({MAX_ITERATIONS}) reached — forcing completion")
             return {"_validation": "COMPLETE"}
 
         # Build a validation request: full conversation + validation prompt
+        logger.info(f"[{req_id}] Validator (iter {iteration}): sanitizing and building request")
         validation_messages = _sanitize_messages(list(messages)) + [
             HumanMessage(content=VALIDATION_PROMPT)
         ]
 
+        logger.info(f"[{req_id}] Validator (iter {iteration}): invoking LLM...")
         response = await llm_validator.ainvoke(validation_messages)
+        logger.info(f"[{req_id}] Validator (iter {iteration}): LLM responded")
         verdict = response.content.strip()
 
-        req_id = state.get("request_id", "")
         logger.info(f"[{req_id}] Validator (iter {iteration}): {verdict[:80]}")
 
         if verdict.startswith("COMPLETE"):

@@ -30,16 +30,33 @@ class UnifiedMCPClient:
         self._tools_cache: List[BaseTool] = []
         self._tool_route_map: Dict[str, str] = {}  # {"tool_name": "server_name"}
 
-        # Server config from environment
-        suppa_env = {
-            **os.environ,
-            "SUPPA_API_KEY": os.getenv("SUPPA_API_KEY", ""),
-            "SUPPA_API_URL": os.getenv("SUPPA_API_URL", "https://sp.modern-expo.com"),
-        }
+    def _build_server_config(self) -> dict:
+        """
+        Build server configuration at runtime (not import time)
+        so that .env values are guaranteed to be loaded.
+        """
+        from dotenv import load_dotenv
+        load_dotenv()  # Ensure .env is loaded
 
-        self.servers = {
-            "knowledge":  {"transport": "sse", "url": os.getenv("MCP_KNOWLEDGE_URL",  "http://127.0.0.1:8081/sse")},
-            "crm":        {
+        suppa_api_key = os.getenv("SUPPA_API_KEY", "")
+        suppa_api_url = os.getenv("SUPPA_API_URL", "https://sp.modern-expo.com")
+
+        if not suppa_api_key:
+            logger.warning("SUPPA_API_KEY is not set — Suppa tools will fail to authenticate!")
+        else:
+            logger.info(f"SUPPA_API_KEY loaded: {suppa_api_key[:4]}...{suppa_api_key[-4:]}")
+
+        # Build env dict for stdio subprocess — all values must be strings
+        suppa_env = {k: str(v) for k, v in os.environ.items()}
+        suppa_env["SUPPA_API_KEY"] = suppa_api_key
+        suppa_env["SUPPA_API_URL"] = suppa_api_url
+
+        return {
+            "knowledge": {
+                "transport": "sse",
+                "url": os.getenv("MCP_KNOWLEDGE_URL", "http://127.0.0.1:8081/sse"),
+            },
+            "crm": {
                 "transport": "stdio",
                 "command": "node",
                 "args": [os.path.join(os.path.dirname(os.path.dirname(__file__)), "suppa-mcp-server", "dist", "index.js")],
@@ -51,8 +68,9 @@ class UnifiedMCPClient:
     def client(self) -> MultiServerMCPClient:
         """Lazy-initialize the underlying MultiServerMCPClient."""
         if self._client is None:
-            self._client = MultiServerMCPClient(self.servers)
-            logger.info("MultiServerMCPClient created for: %s", list(self.servers.keys()))
+            servers = self._build_server_config()
+            self._client = MultiServerMCPClient(servers)
+            logger.info("MultiServerMCPClient created for: %s", list(servers.keys()))
         return self._client
 
     async def connect(self):
@@ -60,9 +78,12 @@ class UnifiedMCPClient:
         Discover tools from each server and build the routing map.
         Called once at FastAPI startup.
         """
+        # Ensure server config is built fresh
+        self._client = None  # Force rebuild with latest env
+        servers = self._build_server_config()
         all_tools: List[BaseTool] = []
 
-        for server_name in self.servers:
+        for server_name in servers:
             try:
                 server_tools = await self.client.get_tools(server_name=server_name)
                 for tool in server_tools:
@@ -76,6 +97,7 @@ class UnifiedMCPClient:
 
         self._tools_cache = all_tools
         logger.info("Total tools discovered: %d", len(all_tools))
+
 
     async def disconnect(self):
         """Clear caches on shutdown."""
