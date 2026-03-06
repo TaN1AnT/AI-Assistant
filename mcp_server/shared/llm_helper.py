@@ -78,4 +78,3 @@ def generate_answer(system_prompt: str, raw_data: str, user_question: str = "") 
         logger.error(f"LLM answer generation failed: {e}", exc_info=True)
         truncated = raw_data[:2000] if len(raw_data) > 2000 else raw_data
         return f"⚠️ Could not generate a summary. Raw data:\n{truncated}"
-        

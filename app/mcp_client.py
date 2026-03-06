@@ -64,9 +64,12 @@ class UnifiedMCPClient:
         Discover tools from each server and build the routing map.
         Called once at FastAPI startup.
         """
+        # Ensure server config is built fresh
+        self._client = None  # Force rebuild with latest env
+        servers = self._build_server_config()
         all_tools: List[BaseTool] = []
 
-        for server_name in self.servers:
+        for server_name in servers:
             try:
                 server_tools = await self.client.get_tools(server_name=server_name)
                 for tool in server_tools:
@@ -80,6 +83,7 @@ class UnifiedMCPClient:
 
         self._tools_cache = all_tools
         logger.info("Total tools discovered: %d", len(all_tools))
+
 
     async def disconnect(self):
         """Clear caches on shutdown."""

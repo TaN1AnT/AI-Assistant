@@ -389,8 +389,14 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
         "_iteration": 0,
         "_validation": "",
     }
+    logger.info(f"[{request_id}] Starting graph.ainvoke...")
+    try:
+        result = await graph.ainvoke(initial_state, config=config)
+        logger.info(f"[{request_id}] graph.ainvoke completed. Result keys: {list(result.keys())}")
+    except Exception as e:
+        logger.error(f"[{request_id}] graph.ainvoke FAILED: {e}", exc_info=True)
+        raise
 
-    result = await graph.ainvoke(initial_state, config=config)
     answer = result["messages"][-1].content
     iterations = result.get("_iteration", 0)
 
@@ -401,13 +407,39 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
 
     unique_tools = list(set(tools_used))
     elapsed_ms = int((time.time() - start_time) * 1000)
-    logger.info(f"[{request_id}] Done in {elapsed_ms}ms. Iterations: {iterations}. Tools: {unique_tools}")
+
+    # Extract sources and URLs from answer (format: [Source: Name (URL)] or [Source: Name])
+    import re
+    print(f"\n--- DEBUG: Extracting sources from answer length {len(answer)} ---", flush=True)
+    
+    # Use re.DOTALL (re.S) to allow .* to match newlines if citations are split
+    # 1. Look for [Source: Text (URL)]
+    url_matches = re.findall(r"\[(?:Source|Джерело):\s*(.*?)\((https?://[^\s)]+)\)\]", answer, re.S)
+    urls = [m[1] for m in url_matches]
+    
+    # 2. Look for [Source: gs://...] or [Джерело: gs://...]
+    gcs_uris = re.findall(r"\[(?:Source|Джерело):\s*(gs://[^\s)\]]+)", answer, re.S)
+    
+    # Combine and deduplicate
+    sources = list(set(urls + gcs_uris))
+
+    # Fallback: if no URLs/URIs found, take any [Source: text]
+    if not sources:
+        plain_text_sources = re.findall(r"\[(?:Source|Джерело):\s*([^\]\)]+)\]", answer, re.S)
+        sources = list(set(plain_text_sources))
+
+    print(f"--- DEBUG: Initial Matches (URLs): {urls} ---", flush=True)
+    print(f"--- DEBUG: Initial Matches (GCS): {gcs_uris} ---", flush=True)
+    print(f"--- DEBUG: Final Sources List: {sources} ---", flush=True)
+
+    logger.info(f"[{request_id}] Done in {elapsed_ms}ms. Iterations: {iterations}. Tools: {unique_tools}. Sources: {sources}")
 
     # Save this turn to session memory
     session_store.save_turn(session_id, query, answer, unique_tools)
 
     return N8NWebhookResponse(
         answer=answer,
+        sources=sources,
         tools_used=unique_tools,
         status="completed",
         execution_time_ms=elapsed_ms,
@@ -455,6 +487,9 @@ async def n8n_webhook_sync(
         response = await _run_ai_query(graph, query_text, req.access_token, request_id, req.session_id)
         return response
     except Exception as e:
+        import traceback
+        with open("error_log.txt", "w") as f:
+            f.write(traceback.format_exc())
         logger.error(f"[{request_id}] n8n webhook error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
