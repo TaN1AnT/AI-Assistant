@@ -15,6 +15,7 @@ import logging
 from typing import List, Dict
 from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from app.config import settings
 
 logger = logging.getLogger("mcp_client")
 
@@ -30,19 +31,22 @@ class UnifiedMCPClient:
         self._tools_cache: List[BaseTool] = []
         self._tool_route_map: Dict[str, str] = {}  # {"tool_name": "server_name"}
 
-        # Server config from environment
+        # Suppa CRM env — pass full parent env + Suppa-specific vars
         suppa_env = {
             **os.environ,
-            "SUPPA_API_KEY": os.getenv("SUPPA_API_KEY", ""),
-            "SUPPA_API_URL": os.getenv("SUPPA_API_URL", "https://sp.modern-expo.com"),
+            "SUPPA_API_KEY": settings.SUPPA_API_KEY,
+            "SUPPA_API_URL": settings.SUPPA_API_URL,
         }
 
         self.servers = {
-            "knowledge":  {"transport": "sse", "url": os.getenv("MCP_KNOWLEDGE_URL",  "http://127.0.0.1:8081/sse")},
-            "crm":        {
+            "knowledge": {
+                "transport": "sse",
+                "url": settings.MCP_KNOWLEDGE_URL,
+            },
+            "crm": {
                 "transport": "stdio",
-                "command": "node",
-                "args": [os.path.join(os.path.dirname(os.path.dirname(__file__)), "suppa-mcp-server", "dist", "index.js")],
+                "command": "npx",
+                "args": ["-y", "suppa-mcp-server"],
                 "env": suppa_env,
             },
         }

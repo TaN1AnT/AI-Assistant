@@ -31,8 +31,10 @@ class Settings(BaseSettings):
 
     # ── MCP Server URLs ──
     MCP_KNOWLEDGE_URL: str = "http://127.0.0.1:8081/sse"
-    MCP_CRM_URL: str = "http://127.0.0.1:8082/sse"
-    MCP_AUTOMATION_URL: str = "http://127.0.0.1:8083/sse"
+
+    # ── Suppa CRM (via suppa-mcp-server stdio, not SSE) ──
+    SUPPA_API_KEY: str = ""
+    SUPPA_API_URL: str = "https://sp.modern-expo.com"
 
     model_config = ConfigDict(env_file=".env", extra="ignore")
 
