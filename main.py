@@ -15,6 +15,9 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, System
 import logging
 import json as json_module
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Configure Structured JSON Logging
 class JSONFormatter(logging.Formatter):
     def format(self, record):
@@ -156,16 +159,19 @@ class N8NWebhookRequest(BaseModel):
     """Incoming request from n8n webhook."""
     message: str = ""                              # User's chat message
     query: str = ""                                # Alternative field name for n8n
-    session_id: str = ""                      # n8n session ID for conversation tracking
-    access_token: str = ""                    # CRM API token (if needed)
-    callback_url: str = ""                    # n8n $execution.resumeUrl
-    context: Optional[Dict[str, Any]] = None  # Extra context
+    session_id: str = ""                           # n8n session ID for conversation tracking
+    access_token: str = ""                         # CRM API token (if needed)
+    callback_url: str = ""                         # n8n $execution.resumeUrl
+    context: Optional[Dict[str, Any]] = None       # Extra context
+    user_id: str = ""                              # From user metadata
+    user_name: str = ""                            # From user metadata
+    user_email: str = ""                           # From user metadata
 
 
 class N8NWebhookResponse(BaseModel):
     """Response sent back to n8n."""
     answer: str
-    sources: List[str] = []
+    sources: List[dict] = []
     tools_used: List[str] = []
     status: str = "completed"
     execution_time_ms: int = 0
@@ -367,7 +373,10 @@ async def sessions_status():
 
 # ── n8n Webhook Endpoints ──
 
-async def _run_ai_query(graph, query: str, access_token: str, request_id: str, session_id: str = "") -> N8NWebhookResponse:
+async def _run_ai_query(
+    graph, query_text: str, access_token: str, request_id: str, session_id: str = "",
+    user_id: str = "", user_name: str = "", user_email: str = ""
+) -> N8NWebhookResponse:
     """Shared logic: runs a query through the supervisor graph with session memory."""
     start_time = time.time()
 
@@ -376,12 +385,13 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
 
     # Load conversation history from session store (cross-request memory)
     history = session_store.load_history(session_id)
-    messages = history + [HumanMessage(content=query)]
+    messages = history + [HumanMessage(content=query_text)]
 
     initial_state = {
         "messages": messages,
-        "user_id": "n8n-webhook",
-        "user_email": "n8n@system",
+        "user_id": user_id or "n8n-webhook",
+        "user_name": user_name or "Unknown User",
+        "user_email": user_email or "n8n@system",
         "user_role": "admin",
         "permissions": ["full_access"],
         "access_token": access_token,
@@ -408,34 +418,69 @@ async def _run_ai_query(graph, query: str, access_token: str, request_id: str, s
     unique_tools = list(set(tools_used))
     elapsed_ms = int((time.time() - start_time) * 1000)
 
-    # Extract sources and URLs from answer (format: [Source: Name (URL)] or [Source: Name])
     import re
     print(f"\n--- DEBUG: Extracting sources from answer length {len(answer)} ---", flush=True)
     
-    # Use re.DOTALL (re.S) to allow .* to match newlines if citations are split
-    # 1. Look for [Source: Text (URL)]
-    url_matches = re.findall(r"\[(?:Source|Джерело):\s*(.*?)\((https?://[^\s)]+)\)\]", answer, re.S)
-    urls = [m[1] for m in url_matches]
-    
-    # 2. Look for [Source: gs://...] or [Джерело: gs://...]
-    gcs_uris = re.findall(r"\[(?:Source|Джерело):\s*(gs://[^\s)\]]+)", answer, re.S)
-    
-    # Combine and deduplicate
-    sources = list(set(urls + gcs_uris))
+    # regex for [Source: filename (URL)] or similar
+    # we want to capture the whole content inside [Source: ...] for the sources list
+    source_regex = r"\[(?:Source|Джерело):\s*(.*?)\]"
+    source_tag_matches = re.findall(source_regex, answer, re.S)
 
-    # Fallback: if no URLs/URIs found, take any [Source: text]
-    if not sources:
-        plain_text_sources = re.findall(r"\[(?:Source|Джерело):\s*([^\]\)]+)\]", answer, re.S)
-        sources = list(set(plain_text_sources))
+    sources = []
+    seen_sources = set()
 
-    print(f"--- DEBUG: Initial Matches (URLs): {urls} ---", flush=True)
-    print(f"--- DEBUG: Initial Matches (GCS): {gcs_uris} ---", flush=True)
+    for s in source_tag_matches:
+        s = s.strip()
+        if not s or s in seen_sources:
+            continue
+            
+        # Try to extract "Name (URL)"
+        match = re.search(r"^(.*?)\s*\(((?:https?://|gs://)[^\)]+)\)$", s)
+        if match:
+            name = match.group(1).strip()
+            url = match.group(2).strip()
+            sources.append(f"{name} ({url})")
+        else:
+            # Fallback for raw URLs
+            url_match = re.search(r"((?:https?://|gs://)[^\s\)\]]+)", s)
+            if url_match:
+                url = url_match.group(1).strip()
+                filename = unquote(url.split("/")[-1].split("?")[0])
+                sources.append(f"{filename} ({url})")
+            else:
+                # Last resort: just use the raw text if it's not a URL
+                sources.append(s)
+        seen_sources.add(s)
+    
+    # Also scan tool messages for any missed Signed URLs as backup
+    gcs_url_pattern = r"https?://storage\.googleapis\.com/[^\s\]\)\"]+"
+    for msg in result["messages"]:
+        if isinstance(msg, ToolMessage):
+            found_urls = re.findall(gcs_url_pattern, msg.content)
+            for url in found_urls:
+                if not any(url in src for src in sources):
+                    filename = unquote(url.split("/")[-1].split("?")[0])
+                    sources.append(f"{filename} ({url})")
+
+    # --- CLEANING THE ANSWER ---
+    # 1. Strip the inline [Source: ...] markers
+    clean_answer = re.sub(r"\s*" + source_regex, "", answer).strip()
+    
+    # 2. Scrub residual "Sources:" footers
+    clean_answer = re.sub(r"(?i)\n*(?:Sources|Джерела|Список джерел|Джерела документації):.*$", "", clean_answer, flags=re.S).strip()
+    
+    # 3. Clean up formatting artifacts (double spaces, spaces before punctuation)
+    clean_answer = re.sub(r"\s+", " ", clean_answer)
+    clean_answer = re.sub(r"\s+([.,!?;])", r"\1", clean_answer)
+    
+    answer = clean_answer
+
     print(f"--- DEBUG: Final Sources List: {sources} ---", flush=True)
 
     logger.info(f"[{request_id}] Done in {elapsed_ms}ms. Iterations: {iterations}. Tools: {unique_tools}. Sources: {sources}")
 
     # Save this turn to session memory
-    session_store.save_turn(session_id, query, answer, unique_tools)
+    session_store.save_turn(session_id, query_text, answer, unique_tools)
 
     return N8NWebhookResponse(
         answer=answer,
@@ -484,7 +529,10 @@ async def n8n_webhook_sync(
     logger.info(f"[{request_id}] n8n SYNC: '{query_text[:80]}'")
 
     try:
-        response = await _run_ai_query(graph, query_text, req.access_token, request_id, req.session_id)
+        response = await _run_ai_query(
+            graph, query_text, req.access_token, request_id, req.session_id,
+            user_id=req.user_id, user_name=req.user_name, user_email=req.user_email
+        )
         return response
     except Exception as e:
         import traceback
@@ -539,7 +587,8 @@ async def n8n_webhook_async(
     # Schedule background processing
     background_tasks.add_task(
         _process_and_callback,
-        graph, query_text, req.access_token, req.callback_url, request_id, req.session_id,
+        graph, query_text, req.access_token, req.callback_url, request_id, 
+        req.session_id, req.user_id, req.user_name, req.user_email
     )
 
     return {
@@ -550,13 +599,17 @@ async def n8n_webhook_async(
 
 
 async def _process_and_callback(
-    graph, query: str, access_token: str, callback_url: str, request_id: str, session_id: str = ""
+    graph, query_text: str, access_token: str, callback_url: str, request_id: str, 
+    session_id: str = "", user_id: str = "", user_name: str = "", user_email: str = ""
 ):
     """Background task: run AI query and POST result to n8n callback."""
     from mcp_server.shared.webhook_helper import _client as httpx_client
 
     try:
-        response = await _run_ai_query(graph, query, access_token, request_id, session_id)
+        response = await _run_ai_query(
+            graph, query_text, access_token, request_id, session_id,
+            user_id=user_id, user_name=user_name, user_email=user_email
+        )
         payload = response.model_dump()
 
         logger.info(f"[{request_id}] Sending callback → {callback_url}")

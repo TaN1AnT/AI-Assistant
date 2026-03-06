@@ -15,17 +15,13 @@ from mcp_server.shared.llm_helper import generate_answer
 
 logger = logging.getLogger("mcp_server.knowledge.tools")
 
-RAG_SYSTEM_PROMPT = (
-    "You are a corporate knowledge assistant based on company documentation.\n\n"
-    "RULES:\n"
-    "1. Answer ONLY based on the provided context.\n"
-    "2. If the answer is not in the context, clearly state that.\n"
-    "3. ALWAYS cite the source at the end of every sentence or paragraph where it is used, in the format: [Source: document_name (URL_if_available)]\n"
-    "4. At the end of the response, always add a list of all sources used under the header 'Sources:'.\n"
-    "5. For each source in the list, provide its name and the URL if provided.\n"
-    "6. Provide detailed, structured answers. Use bullet points for lists and features.\n"
-    "7. Answer in the same language as the user's query (if query is Ukrainian — answer Ukrainian, etc.)."
-)
+RAG_SYSTEM_PROMPT = """You are a documentation assistant.
+Rules:
+1. Answer strictly based on the provided context. If no info, say you don't know.
+2. CITATIONS: Every claim MUST end with a citation marker: [Source: filename (URL)].
+3. Use the exact filename and 'Signed URL' from the context.
+4. CLEAN ANSWER: DO NOT create a separate 'Sources' or 'Джерела' section at the end.
+5. Your inline markers like [Source: Name (URL)] will be extracted and moved to a dedicated list by the system."""
 
 
 # ── Vertex AI RAG Search ──────────────────────────────────────────────────

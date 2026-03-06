@@ -62,7 +62,8 @@ TOOL RULES:
 5. TIMESTAMPS: Suppa uses Unix timestamps in MILLISECONDS.
 6. Call multiple tools in parallel when possible.
 7. Generate ONE structured answer with bullet points and icons (✅/❌/⏳).
-8. Never expose tokens or URLs.
+8. Never expose tokens or plain internal URLs unless cited as follows.
+9. METADATA FILTERING: If the user asks for "my" data (tasks, projects, etc.), use the provided `user_id` in the `filter` argument of Suppa tools. Example: `filter={"created_by_id": "provided_user_id"}` or `{"responsible_id": "provided_user_id"}`.
 
 SUPPA WORKFLOW (follow this order):
 1. User asks about records → identify which entity (table) is involved.
@@ -72,10 +73,10 @@ SUPPA WORKFLOW (follow this order):
 5. Synthesize ONE clear, structured answer from all gathered data.
 
 IMPORTANT: When using 'rag_search', you MUST follow these citation rules:
-1. Every claim from a document must end with a citation: [Source: Document Name (URL)].
-2. You MUST use the exact URLs provided in the tool's 'Signed URL' field. These are clickable links.
-3. At the very end of your response, you MUST provide a dedicated section with the header 'Sources:' followed by a list of all used sources with their full URLs.
-4. DO NOT translate the word 'Sources' or 'Source' into other languages. Always use English for these tags to ensure correct system parsing."""
+1. Every claim from a document must end with an inline citation marker: [Source: filename (URL)].
+2. Use the exact 'filename' and clickable 'URL' (Signed URL) provided by the tool.
+3. CLEAN ANSWER: Do NOT provide a 'Sources:' or 'Джерела:' section at the end. 
+4. Just provide the answer with inline markers like [Source: Name (URL)]. These will be extracted and moved to a list by the system."""
 
 
 # ── Validation Prompt ──────────────────────────────────────────────────────
@@ -124,26 +125,25 @@ async def build_agent_graph():
     def _sanitize_messages(msgs):
         """
         Vertex AI rejects messages with empty 'content' (400: must include parts).
-        This ensures every message has some text content.
+        This ensures every message has some text content while preserving
+        important nudges from the validator.
         """
         clean = []
         for m in msgs:
+            # Copy to avoid mutating original state if possible
             content = getattr(m, 'content', "")
+            
             if not content:
                 if isinstance(m, AIMessage) and getattr(m, 'tool_calls', None):
                     # AI message with tool calls often has empty content
                     m = AIMessage(content="(calling tools)", tool_calls=m.tool_calls, id=m.id)
                 elif isinstance(m, ToolMessage):
-                    # Tool response might be empty
                     m = ToolMessage(content="(tool result)", tool_call_id=m.tool_call_id)
                 elif isinstance(m, SystemMessage):
                     m = SystemMessage(content="(system prompt)")
-                elif isinstance(m, HumanMessage):
-                    m = HumanMessage(content="(empty message)")
                 else:
-                    # Fallback for any other message types
-                    if hasattr(m, 'content'):
-                        m.content = "(no content)"
+                    m.content = "(empty)"
+            
             clean.append(m)
         return clean
 
@@ -161,10 +161,18 @@ async def build_agent_graph():
         req_id = state.get("request_id", "")
         iteration = state.get("_iteration", 0) + 1
 
-        system_prompt = SYSTEM_PROMPT_TEMPLATE
+        user_id = state.get('user_id', 'Unknown')
+        user_name = state.get('user_name', 'Unknown')
+        user_email = state.get('user_email', 'no-email')
+        
+        context = f"\n\n[USER CONTEXT]\n- Name: {user_name}\n- ID: {user_id}\n- Email: {user_email}\n"
+        system_prompt = SYSTEM_PROMPT_TEMPLATE + context
 
         if not messages or not isinstance(messages[0], SystemMessage):
             messages = [SystemMessage(content=system_prompt)] + messages
+        else:
+            # Update existing system prompt if it's the first message
+            messages[0] = SystemMessage(content=system_prompt)
 
         # Sanitize messages to prevent Vertex AI 400 errors
         logger.info(f"[{req_id}] Supervisor (iter {iteration}): sanitizing {len(messages)} messages")
