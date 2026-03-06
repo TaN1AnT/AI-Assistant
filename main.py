@@ -427,55 +427,59 @@ async def _run_ai_query(
     source_tag_matches = re.findall(source_regex, answer, re.S)
 
     sources = []
-    seen_sources = set()
+    seen_urls = set()
 
     for s in source_tag_matches:
         s = s.strip()
-        if not s or s in seen_sources:
-            continue
-            
-        # Try to extract "Name (URL)"
+        
+        # This regex looks for: Everything before the parenthesis -> (URL)
+        # Group 1 = Name, Group 2 = URL (http, https, or gs://)
         match = re.search(r"^(.*?)\s*\(((?:https?://|gs://)[^\)]+)\)$", s)
+        
         if match:
             name = match.group(1).strip()
             url = match.group(2).strip()
-            sources.append(f"{name} ({url})")
-        else:
-            # Fallback for raw URLs
+            
+            if url not in seen_urls:
+                sources.append({
+                    "name": name,
+                    "url": url
+                })
+                seen_urls.add(url)
+                
+        # Fallback: If the LLM just spat out a raw URL without a name, or formatted it weirdly
+        elif "http" in s or "gs://" in s:
             url_match = re.search(r"((?:https?://|gs://)[^\s\)\]]+)", s)
             if url_match:
                 url = url_match.group(1).strip()
-                filename = unquote(url.split("/")[-1].split("?")[0])
-                sources.append(f"{filename} ({url})")
-            else:
-                # Last resort: just use the raw text if it's not a URL
-                sources.append(s)
-        seen_sources.add(s)
-    
-    # Also scan tool messages for any missed Signed URLs as backup
-    gcs_url_pattern = r"https?://storage\.googleapis\.com/[^\s\]\)\"]+"
-    for msg in result["messages"]:
-        if isinstance(msg, ToolMessage):
-            found_urls = re.findall(gcs_url_pattern, msg.content)
-            for url in found_urls:
-                if not any(url in src for src in sources):
-                    filename = unquote(url.split("/")[-1].split("?")[0])
-                    sources.append(f"{filename} ({url})")
+                
+                if url not in seen_urls:
+                    # Extract the filename from the end of the URL to use as the name
+                    fallback_name = unquote(url.split("/")[-1].split("?")[0])
+                    
+                    sources.append({
+                        "name": fallback_name,
+                        "url": url
+                    })
+                    seen_urls.add(url)
+                
 
     # --- CLEANING THE ANSWER ---
     # 1. Strip the inline [Source: ...] markers
+    # We also try to clean up the space before the citation if any
     clean_answer = re.sub(r"\s*" + source_regex, "", answer).strip()
     
-    # 2. Scrub residual "Sources:" footers
-    clean_answer = re.sub(r"(?i)\n*(?:Sources|Джерела|Список джерел|Джерела документації):.*$", "", clean_answer, flags=re.S).strip()
-    
-    # 3. Clean up formatting artifacts (double spaces, spaces before punctuation)
+    # 3. Clean up double spaces or spaces before punctuation that might be left over
     clean_answer = re.sub(r"\s+", " ", clean_answer)
     clean_answer = re.sub(r"\s+([.,!?;])", r"\1", clean_answer)
+    
+    # 2. Strip any residual "Sources:" or "Джерела:" sections at the end
+    clean_answer = re.sub(r"(?i)\n*(?:Sources|Джерела|Список джерел|Джерела документації):.*$", "", clean_answer, flags=re.S).strip()
     
     answer = clean_answer
 
     print(f"--- DEBUG: Final Sources List: {sources} ---", flush=True)
+    print(f"--- DEBUG: Cleaned Answer Length: {len(answer)} ---", flush=True)
 
     logger.info(f"[{request_id}] Done in {elapsed_ms}ms. Iterations: {iterations}. Tools: {unique_tools}. Sources: {sources}")
 
