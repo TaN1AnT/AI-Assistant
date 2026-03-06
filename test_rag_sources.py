@@ -11,7 +11,11 @@ def test_rag_sources():
     
     # Query testing both RAG and Suppa with user metadata
     payload = {
+<<<<<<< HEAD
         "query": "що таке suppa.",
+=======
+        "query": "Що таке конвінік і дай посилання на джерела документації.",
+>>>>>>> 780fdfd205322e9f330a9356ddf35a4e4f16de35
         "session_id": "full-workflow-metadata-test",
         "user_id": "0238c601-1415-4c51-80b6-d9dfb592ea57",
         "user_email": "mykola.demchuk@modern-expo.com",
